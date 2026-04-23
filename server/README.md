@@ -65,6 +65,25 @@ npm install
 npm run deploy
 ```
 
+### GitHub Actions one-click deploy (optional R2)
+
+在仓库中手动运行 `.github/workflows/deploy-cloudflare.yml`：
+
+- `enable_r2 = true`（默认）时：
+  - 自动检查并创建（若不存在）固定桶名 `yaos-bucket`
+  - 自动生成临时 `wrangler.ci.toml`
+  - 以固定绑定名 `YAOS_BUCKET` 部署
+- `enable_r2 = false` 时：
+  - 跳过 R2 检查/创建与绑定注入
+  - 按 `server/wrangler.toml` 直接部署
+
+需要配置以下 GitHub Secrets：
+
+- `CF_ACCOUNT_ID`
+- `CF_API_TOKEN`
+
+> 修改点：新增 Actions 一键部署说明，支持 R2 可选且默认检查并创建。
+
 ### Optional post-deploy R2 setup
 
 If you want attachments and snapshots later:

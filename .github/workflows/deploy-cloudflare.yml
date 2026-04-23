@@ -1,0 +1,64 @@
+name: Deploy Cloudflare Worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      enable_r2:
+        description: "是否自动检查/创建并绑定 R2"
+        type: boolean
+        required: true
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      # 修改点：固定 R2 绑定名
+      R2_BINDING_NAME: YAOS_BUCKET
+      # 修改点：固定 R2 存储桶名（如需调整可直接改此处）
+      R2_BUCKET_NAME: yaos-bucket
+      # 修改点：统一传递 Cloudflare 认证环境变量
+      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+      CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+      - run: npm ci --prefix server
+
+      - name: Ensure R2 bucket when enabled
+        if: ${{ inputs.enable_r2 }}
+        run: node scripts/cloudflare-r2.mjs ensure-bucket
+
+      - name: Generate CI wrangler config with R2 binding
+        if: ${{ inputs.enable_r2 }}
+        env:
+          # 修改点：为脚本显式指定输入输出 wrangler 文件
+          WRANGLER_BASE_PATH: server/wrangler.toml
+          WRANGLER_OUT_PATH: server/wrangler.ci.toml
+        run: node scripts/cloudflare-r2.mjs write-wrangler-ci
+
+      - name: Deploy with R2-enabled config
+        if: ${{ inputs.enable_r2 }}
+        working-directory: server
+        run: npm run deploy -- --config wrangler.ci.toml
+
+      - name: Deploy with default wrangler config
+        if: ${{ !inputs.enable_r2 }}
+        working-directory: server
+        run: npm run deploy
+
+      - name: Cleanup temporary wrangler config
+        if: ${{ always() }}
+        run: rm -f server/wrangler.ci.toml
