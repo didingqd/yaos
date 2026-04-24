@@ -2,12 +2,40 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// 修改点：新增 R2 桶名解析函数（优先显式配置，缺省回退默认值）
+export function resolveR2BucketName(env) {
+  const configured = env?.R2_BUCKET_NAME;
+  if (configured && String(configured).trim() !== '') {
+    return String(configured).trim();
+  }
+  return 'yaos-bucket';
+}
+
+// 修改点：新增 Cloudflare 账号 ID 解析（兼容 CF_* 与 CLOUDFLARE_*）
+export function resolveCloudflareAccountId(env) {
+  const value = env?.CF_ACCOUNT_ID || env?.CLOUDFLARE_ACCOUNT_ID;
+  if (!value || String(value).trim() === '') {
+    return '';
+  }
+  return String(value).trim();
+}
+
+// 修改点：新增 Cloudflare API Token 解析（兼容 CF_* 与 CLOUDFLARE_*）
+export function resolveCloudflareApiToken(env) {
+  const value = env?.CF_API_TOKEN || env?.CLOUDFLARE_API_TOKEN;
+  if (!value || String(value).trim() === '') {
+    return '';
+  }
+  return String(value).trim();
+}
+
 // 修改点：新增必填环境变量校验函数
 export function assertRequiredEnv(env) {
-  for (const key of ['CF_ACCOUNT_ID', 'CF_API_TOKEN', 'R2_BUCKET_NAME']) {
-    if (!env[key] || String(env[key]).trim() === '') {
-      throw new Error(`Missing required env: ${key}`);
-    }
+  if (!resolveCloudflareAccountId(env)) {
+    throw new Error('Missing required env: CF_ACCOUNT_ID or CLOUDFLARE_ACCOUNT_ID');
+  }
+  if (!resolveCloudflareApiToken(env)) {
+    throw new Error('Missing required env: CF_API_TOKEN or CLOUDFLARE_API_TOKEN');
   }
 }
 
@@ -31,7 +59,7 @@ async function cfFetch(pathname, options = {}) {
   const response = await fetch(`${baseUrl}${pathname}`, {
     ...options,
     headers: {
-      Authorization: `Bearer ${process.env.CF_API_TOKEN}`,
+      Authorization: `Bearer ${resolveCloudflareApiToken(process.env)}`,
       'Content-Type': 'application/json',
       ...(options.headers || {}),
     },
@@ -56,7 +84,7 @@ async function ensureBucket() {
   assertRequiredEnv(process.env);
 
   const accountId = process.env.CF_ACCOUNT_ID;
-  const bucketName = process.env.R2_BUCKET_NAME;
+  const bucketName = resolveR2BucketName(process.env);
 
   const listResult = await cfFetch(`/accounts/${accountId}/r2/buckets`);
   const buckets = listResult?.result?.buckets || listResult?.result || [];
@@ -92,7 +120,7 @@ async function writeWranglerCiConfig() {
   const basePath = process.env.WRANGLER_BASE_PATH || path.join('server', 'wrangler.toml');
   const outPath = process.env.WRANGLER_OUT_PATH || path.join('server', 'wrangler.ci.toml');
   const binding = process.env.R2_BINDING_NAME || 'YAOS_BUCKET';
-  const bucketName = process.env.R2_BUCKET_NAME;
+  const bucketName = resolveR2BucketName(process.env);
 
   if (!bucketName || String(bucketName).trim() === '') {
     throw new Error('Missing required env: R2_BUCKET_NAME');
