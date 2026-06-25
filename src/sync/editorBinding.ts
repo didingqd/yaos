@@ -5,7 +5,10 @@ import * as Y from "yjs";
 import { Notice, type MarkdownView } from "obsidian";
 import type { VaultSync } from "./vaultSync";
 import { applyDiffToYText } from "./diff";
-import type { TraceRecord } from "../debug/trace";
+import type { TraceRecord } from "../observability/traceContext";
+import type { ProductFlightPathEventInput } from "../observability/traceSink";
+import { PRODUCT_EVENT_KIND } from "../observability/productEventKinds";
+import { ORIGIN_EDITOR_HEALTH_HEAL } from "./origins";
 
 /**
  * Manages per-editor CM6 bindings via yCollab.
@@ -86,6 +89,30 @@ interface BindingTarget {
 	fileId?: string;
 }
 
+/**
+ * Harness-only gate for pausing editor<->CRDT propagation on specific paths.
+ * Supplied by the QA harness via the EditorBindingManager constructor.
+ * Absent in production. Default: all paths are unpaused.
+ *
+ * The gate owns the mutable paused-path set. The EditorBindingManager
+ * only reads from it (isPaused) — it does not mutate it.
+ *
+ * The harness must call reconfigureBindingForPath after mutating the set
+ * so that the CodeMirror compartment is updated.
+ */
+export interface BindingPropagationGate {
+	/** Returns true if propagation for this path is currently paused. */
+	isPaused(path: string): boolean;
+	/**
+	 * Called by EditorBindingManager to expose a reconfigure hook for
+	 * the harness. The harness calls reconfigure(path, deviceName) after
+	 * pausing or resuming to apply the CM extension change.
+	 */
+	registerReconfigureHook(
+		fn: (path: string, deviceName: string, action: "pause" | "resume") => void,
+	): void;
+}
+
 export class EditorBindingManager {
 	/** The CM6 compartment that holds yCollab for each editor. */
 	readonly compartment = new Compartment();
@@ -109,8 +136,28 @@ export class EditorBindingManager {
 		private vaultSync: VaultSync,
 		debug: boolean,
 		private trace?: TraceRecord,
+		private recordFlightPathEvent?: (event: ProductFlightPathEventInput) => void,
+		private readonly bindingPropagationGate?: BindingPropagationGate,
 	) {
 		this.debug = debug;
+		// Register the reconfigure hook so the harness can trigger CM extension
+		// changes after mutating the paused-path set.
+		bindingPropagationGate?.registerReconfigureHook((path, deviceName, action) => {
+			for (const [leafId, binding] of this.bindings) {
+				if (binding.path !== path) continue;
+				if (action === "pause") {
+					try {
+						binding.cm.dispatch({ effects: this.compartment.reconfigure([]) });
+					} catch {
+						// view may be destroyed
+					}
+				} else {
+					// Resume: re-apply yCollab via repair.
+					this.repair(binding.view, deviceName, "harness-resume-binding-propagation");
+				}
+				void leafId;
+			}
+		});
 	}
 
 	/**
@@ -307,13 +354,36 @@ export class EditorBindingManager {
 
 		const currentContent = view.editor.getValue();
 		const crdtContent = target.ytext.toJSON();
-		if (crdtContent !== currentContent) {
+		const diffApplied = crdtContent !== currentContent;
+		if (diffApplied) {
 			this.log(
 				`heal: applying local editor content to "${file.path}" ` +
 				`(${crdtContent.length} -> ${currentContent.length} chars, reason=${reason})`,
 			);
-			applyDiffToYText(target.ytext, crdtContent, currentContent, "editor-health-heal");
+			applyDiffToYText(target.ytext, crdtContent, currentContent, ORIGIN_EDITOR_HEALTH_HEAL);
 		}
+
+		// Emit editor.heal.applied unconditionally on heal() entry so that
+		// "no editor.heal.applied event" means "heal() was not invoked",
+		// not "heal() was invoked but happened to be a no-op". The
+		// diffApplied flag distinguishes the two cases. See spec:
+		// .kiro/specs/controller-recovery-orchestration/requirements.md R5.
+		this.recordFlightPathEvent?.({
+			priority: "important",
+			kind: PRODUCT_EVENT_KIND.editorHealApplied,
+			severity: "info",
+			scope: "file",
+			source: "editorBinding",
+			layer: "editor",
+			path: file.path,
+			data: {
+				reason,
+				crdtLength: crdtContent.length,
+				editorLength: currentContent.length,
+				crdtMatchesEditorBefore: !diffApplied,
+				diffApplied,
+			},
+		});
 
 		return this.repair(view, deviceName, reason);
 	}
@@ -703,6 +773,10 @@ export class EditorBindingManager {
 		view: MarkdownView,
 		binding: EditorBinding,
 	): BindingHealthCheck {
+		if (this.bindingPropagationGate?.isPaused(binding.path)) {
+			// Harness gate: treat as healthy so we don't auto-heal/rebind mid-scenario.
+			return { healthy: true, settling: false, issues: [], deferredIssues: [] };
+		}
 		const issues: string[] = [];
 		const deferredIssues: string[] = [];
 		const file = view.file;
@@ -765,6 +839,7 @@ export class EditorBindingManager {
 	): void {
 		if (this.healthWorkInFlight.has(leafId)) return;
 		if (this.bindings.get(leafId) !== binding) return;
+		if (this.bindingPropagationGate?.isPaused(binding.path)) return;
 
 		const health = this.inspectBindingHealth(binding.view, binding);
 		if (health.healthy || health.settling) return;
@@ -1009,6 +1084,26 @@ export class EditorBindingManager {
 			settleWindowMs,
 			rapidSwitch,
 		});
+
+		// Emit editor.repair.applied only for successful repair-action applications.
+		// See spec: .kiro/specs/controller-recovery-orchestration/requirements.md R4.
+		if (action === "repair") {
+			this.recordFlightPathEvent?.({
+				priority: "important",
+				kind: PRODUCT_EVENT_KIND.editorRepairApplied,
+				severity: "info",
+				scope: "file",
+				source: "editorBinding",
+				layer: "editor",
+				path: filePath,
+				data: {
+					leafId,
+					cmId,
+					reason: reason ?? null,
+					rapidSwitch,
+				},
+			});
+		}
 
 		const result = action === "repair" ? "repaired" : "bound";
 		const reasonSuffix = reason ? `, reason=${reason}` : "";

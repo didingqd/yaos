@@ -22,19 +22,19 @@ function sliceBetween(source, startMarker, endMarker) {
 	return source.slice(start, end);
 }
 
-const mainSource = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+const workspaceSource = readFileSync(new URL("../src/runtime/editorWorkspaceOrchestrator.ts", import.meta.url), "utf8");
 const bindingSource = readFileSync(new URL("../src/sync/editorBinding.ts", import.meta.url), "utf8");
 
-console.log("\n--- Test 1: validateAllOpenBindings uses repair-only flow ---");
+console.log("\n--- Test 1: validateOpenBindings uses repair-only flow ---");
 {
 	const section = sliceBetween(
-		mainSource,
-		"private validateAllOpenBindings(reason: string): void {",
-		"private trackOpenFile(path: string): void {",
+		workspaceSource,
+		"validateOpenBindings(reason: string): void {",
+		"auditBindings(reason: string): number {",
 	);
-	assert(section !== null, "validateAllOpenBindings section found");
-	assert(section?.includes("this.editorBindings?.repair("), "validateAllOpenBindings calls repair");
-	assert(!section?.includes("this.editorBindings?.heal("), "validateAllOpenBindings does not call heal");
+	assert(section !== null, "validateOpenBindings section found");
+	assert(section?.includes("editorBindings.repair("), "validateOpenBindings calls repair");
+	assert(!section?.includes("editorBindings.heal("), "validateOpenBindings does not call heal");
 }
 
 console.log("\n--- Test 2: bind unhealthy path uses repair, not heal ---");
@@ -70,14 +70,21 @@ console.log("\n--- Test 4: editor-health-heal origin remains manual-only ---");
 		"rebind(view: MarkdownView, deviceName: string, reason: string): void {",
 	);
 	assert(healSection !== null, "heal section found");
+	// After the origin-constants refactor the call site uses ORIGIN_EDITOR_HEALTH_HEAL
+	// (imported from src/sync/origins.ts) instead of the raw string. Check for the
+	// constant name rather than the literal.
 	assert(
-		healSection?.includes('"editor-health-heal"'),
-		"editor-health-heal origin exists only in heal() implementation",
+		healSection?.includes("ORIGIN_EDITOR_HEALTH_HEAL"),
+		"editor-health-heal origin used via named constant in heal() implementation",
 	);
+	// Strip the heal section then check that applyDiffToYText is NOT called
+	// with ORIGIN_EDITOR_HEALTH_HEAL outside it. The import declaration
+	// is allowed to remain (it's not a call site). Use [^\n)]* to stay
+	// on the same line and avoid spurious cross-line matches.
 	const strippedSource = bindingSource.replace(healSection ?? "", "");
 	assert(
-		!strippedSource.includes('"editor-health-heal"'),
-		"editor-health-heal origin not used outside heal()",
+		!strippedSource.match(/applyDiffToYText[^\n)]*ORIGIN_EDITOR_HEALTH_HEAL/),
+		"ORIGIN_EDITOR_HEALTH_HEAL not passed to applyDiffToYText outside heal()",
 	);
 }
 

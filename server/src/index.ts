@@ -1,548 +1,373 @@
-import { getServerByName } from "partyserver";
-import * as Y from "yjs";
-import { mapWithConcurrency } from "./concurrency";
-import { sha256Hex } from "./hex";
 import { ServerConfig, type StoredServerConfig } from "./config";
-import {
-	blobKey,
-	createSnapshot,
-	getSnapshotPayload,
-	hasSnapshotForDay,
-	listSnapshots,
-	type SnapshotResult,
-} from "./snapshot";
+import { VaultSyncServer } from "./server";
 import { renderMobileSetupPage, renderRunningPage, renderSetupPage } from "./setupPage";
 import {
-	SERVER_MAX_SCHEMA_VERSION,
-	SERVER_MIGRATION_REQUIRED,
-	SERVER_MIN_PLUGIN_VERSION,
-	SERVER_MIN_SCHEMA_VERSION,
-	SERVER_RECOMMENDED_PLUGIN_VERSION,
-	SERVER_VERSION,
-} from "./version";
-import { VaultSyncServer } from "./server";
+	canonicalRepoForSetup,
+	getAuthStateCached,
+	getCapabilities,
+	getHttpAuthToken,
+	getStoredServerConfigCached,
+	handleClaimRoute,
+	handleUpdateMetadataRoute,
+	isAuthorized,
+	rejectUnauthorizedVaultRequest,
+	supportsBuckets,
+} from "./routes/auth";
+import { handleBlobRoute } from "./routes/blobs";
+import { corsPreflight, html, json, withCors } from "./routes/http";
+import { handleSnapshotRoute } from "./routes/snapshots";
+import { handleSyncSocketRoute, parseSyncPath } from "./routes/syncSocket";
+import { handleTicketRoute } from "./routes/ticket";
+import { fetchVaultDebug, fetchVaultDocument, recordVaultTrace } from "./routes/trace";
+import type { AuthState, AuthStateCached, Env } from "./routes/types";
 
-const MAX_BLOB_UPLOAD_BYTES = 10 * 1024 * 1024;
-const EXISTS_BATCH_LIMIT = 50;
-const R2_HEAD_CONCURRENCY = 4;
-const CORS_ALLOW_HEADERS = "Authorization, Content-Type";
-const CORS_ALLOW_METHODS = "GET, POST, PUT, OPTIONS";
-const CORS_EXPOSE_HEADERS = "X-YAOS-Snapshot-Day";
 const LOG_PREFIX = "[yaos-sync:worker]";
 
-interface Env {
-	SYNC_TOKEN?: string;
-	YAOS_CANONICAL_REPO?: string;
-	YAOS_SYNC: DurableObjectNamespace<VaultSyncServer>;
-	YAOS_CONFIG: DurableObjectNamespace;
-	YAOS_BUCKET?: R2Bucket;
-}
+// ── Route classification ──────────────────────────────────────────────────────
+//
+// INVARIANT (issue #40): unknown routes MUST return 404 before any Durable
+// Object namespace is touched.  classifyWorkerRoute() is a pure function that
+// inspects only the request method and pathname.  getAuthStateCached() — which
+// contacts YAOS_CONFIG — is only called for routes that classifyWorkerRoute
+// recognises as valid YAOS routes.  Junk paths (/wp-login.php, /favicon.ico,
+// /random-garbage) never reach the DO.
+//
+// Vault resource whitelist: only the four known resources can proceed to auth.
+// /vault/:id/<anything-else> is classified as not-found here, before any
+// YAOS_CONFIG or YAOS_SYNC access, so vault-shaped scanner traffic (/vault/foo/
+// probe, /vault/foo/wp-login.php) is as cheap as a plain unknown path.
 
-type AuthState =
-	| { mode: "env"; claimed: true; envToken: string }
-	| { mode: "claim"; claimed: true; tokenHash: string }
-	| { mode: "unclaimed"; claimed: false };
+type WorkerRoute =
+	| { kind: "cors-preflight" }
+	| { kind: "home" }
+	| { kind: "mobile-setup" }
+	| { kind: "capabilities" }
+	| { kind: "claim" }
+	| { kind: "update-metadata" }
+	| { kind: "sync-socket"; vaultId: string }
+	| { kind: "vault"; vaultId: string; resource: string; rest: string[] }
+	| { kind: "not-found" };
 
-type UpdateProvider = "github" | "gitlab" | "unknown";
+/**
+ * The complete set of vault sub-resources the server actually handles.
+ * Anything outside this set returns not-found before auth — zero DO access.
+ */
+const VALID_VAULT_RESOURCES = new Set(["auth", "debug", "blobs", "snapshots"]);
 
-type FatalAuthCode = "unauthorized" | "server_misconfigured" | "unclaimed" | "update_required";
-const LEGACY_CLIENT_SCHEMA_VERSION = 1;
+// ─────────────────────────────────────────────────────────────────────────────
+// SECURITY / BILLING INVARIANT — route classifier duplication is intentional
+//
+// isKnownVaultRouteShape() and isKnownSnapshotRouteShape() intentionally
+// duplicate the route table already encoded in routes/blobs.ts,
+// routes/snapshots.ts, etc.  The duplication exists so structurally invalid
+// requests (wrong method, unknown subpath) can be rejected here — before any
+// auth check or Durable Object access — rather than reaching a handler that
+// would 404 after paying the YAOS_CONFIG round-trip.
+//
+// Consequence: any new /vault/:id/* handler route MUST also be added here,
+// with a corresponding trap-env regression test proving the invalid shape
+// still does not touch YAOS_CONFIG or YAOS_SYNC.  Forgetting this step causes
+// a "security gate forgot the new endpoint" bug: the new route works fine in
+// handler unit tests but gets pre-auth 404'd in production by the classifier.
+//
+// To add a new vault resource or subpath:
+//   1. Add the handler in server/src/routes/<resource>.ts
+//   2. Add the resource to VALID_VAULT_RESOURCES below (if it's new)
+//   3. Add the route shape to isKnownVaultRouteShape / isKnownSnapshotRouteShape
+//   4. Add a trap-env test to tests/server-route-classification-runtime.ts
+//      asserting that the valid shape reaches auth and the invalid shapes
+//      (wrong method, unknown subpath) still return 404 without DO access
+// ─────────────────────────────────────────────────────────────────────────────
 
-function json(body: unknown, status = 200): Response {
-	return new Response(JSON.stringify(body), {
-		status,
-		headers: {
-			"Content-Type": "application/json; charset=utf-8",
-			"Cache-Control": "no-store",
-		},
-	});
-}
-
-function withCors(response: Response): Response {
-	const headers = new Headers(response.headers);
-	headers.set("Access-Control-Allow-Origin", "*");
-	headers.set("Access-Control-Allow-Headers", CORS_ALLOW_HEADERS);
-	headers.set("Access-Control-Allow-Methods", CORS_ALLOW_METHODS);
-	headers.set("Access-Control-Expose-Headers", CORS_EXPOSE_HEADERS);
-
-	const responseWithSocket = response as { webSocket?: WebSocket };
-	return new Response(response.body, {
-		status: response.status,
-		statusText: response.statusText,
-		headers,
-		webSocket: responseWithSocket.webSocket,
-	});
-}
-
-function corsPreflight(): Response {
-	return withCors(new Response(null, { status: 204 }));
-}
-
-function html(body: string, status = 200): Response {
-	return new Response(body, {
-		status,
-		headers: {
-			"Content-Type": "text/html; charset=utf-8",
-			"Cache-Control": "no-store",
-		},
-	});
-}
-
-function isValidHash(hash: string): boolean {
-	return /^[0-9a-f]{64}$/.test(hash);
-}
-
-function getHttpAuthToken(req: Request): string | null {
-	const auth = req.headers.get("Authorization");
-	if (!auth?.startsWith("Bearer ")) return null;
-	const token = auth.slice("Bearer ".length).trim();
-	return token || null;
-}
-
-function getSocketAuthToken(req: Request): string | null {
-	const headerToken = getHttpAuthToken(req);
-	if (headerToken) return headerToken;
-	return new URL(req.url).searchParams.get("token");
-}
-
-function parseClientSchemaVersion(url: URL): { version: number; source: "query" | "legacy-default" } | null {
-	const raw = url.searchParams.get("schemaVersion") ?? url.searchParams.get("schema");
-	if (raw === null || raw.trim() === "") {
-		return { version: LEGACY_CLIENT_SCHEMA_VERSION, source: "legacy-default" };
+/**
+ * Full route-shape validation for the snapshots resource.
+ *
+ * Valid shapes derived from handleSnapshotRoute in routes/snapshots.ts:
+ *   POST   /snapshots          → create snapshot from live doc
+ *   POST   /snapshots/maybe    → daily snapshot (idempotent)
+ *   POST   /snapshots/prune    → apply retention
+ *   GET    /snapshots          → list snapshots
+ *   GET    /snapshots/status   → storage status
+ *   GET    /snapshots/:id      → fetch snapshot payload (any non-empty segment)
+ *
+ * Note: GET /snapshots/:id does not validate the ID format here.  A garbage ID
+ * will pass the shape check, reach auth, and return 404 from R2 — that is
+ * intentional.  Validating IDs in the classifier would move business logic
+ * into the gatekeeper and create a maintenance trap.
+ */
+function isKnownSnapshotRouteShape(method: string, rest: string[]): boolean {
+	if (rest.length === 0) {
+		return method === "POST" || method === "GET";
 	}
-	const parsed = Number(raw);
-	if (!Number.isInteger(parsed) || parsed < 0) return null;
-	return { version: parsed, source: "query" };
+	if (rest.length === 1) {
+		const sub = rest[0]!;
+		if (method === "POST") return sub === "maybe" || sub === "prune";
+		// GET /snapshots/status and GET /snapshots/:snapshotId are both valid
+		if (method === "GET") return sub.length > 0;
+	}
+	return false;
 }
 
-function parseSyncPath(pathname: string): { vaultId: string } | null {
-	const directMatch = pathname.match(/^\/vault\/sync\/([^/]+)$/);
-	if (directMatch) {
-		const [, vaultId] = directMatch;
-		if (vaultId) {
-			return { vaultId: decodeURIComponent(vaultId) };
+/**
+ * Validates that a vault route has a known method+resource+subpath combination.
+ * Routes that fail this check return not-found immediately, before any auth or
+ * Durable Object access.
+ *
+ * Valid shapes are derived directly from the route handlers in routes/:
+ *   auth:      POST /auth/ticket
+ *   debug:     GET  /debug/recent
+ *   blobs:     GET|PUT /blobs/:hash,  POST /blobs/exists
+ *              (GET|PUT /blobs/exists are structurally valid — the blob handler
+ *               treats "exists" as a hash and rejects/misses it after auth,
+ *               without touching YAOS_SYNC or hydrating the room)
+ *   snapshots: see isKnownSnapshotRouteShape above
+ *
+ * See the SECURITY/BILLING INVARIANT comment above before adding new shapes.
+ */
+function isKnownVaultRouteShape(method: string, resource: string, rest: string[]): boolean {
+	switch (resource) {
+		case "auth":
+			return method === "POST" && rest.length === 1 && rest[0] === "ticket";
+
+		case "debug":
+			return method === "GET" && rest.length === 1 && rest[0] === "recent";
+
+		case "blobs": {
+			if (rest.length !== 1) return false;
+			if (method === "POST") return rest[0] === "exists";
+			return method === "GET" || method === "PUT";
 		}
+
+		case "snapshots":
+			return isKnownSnapshotRouteShape(method, rest);
+
+		default:
+			return false;
 	}
-	return null;
 }
 
-function parseVaultPath(pathname: string): { vaultId: string; rest: string[] } | null {
+function parseVaultPath(pathname: string): { vaultId: string; resource: string | null; rest: string[] } | null {
 	const parts = pathname.split("/").filter(Boolean);
 	if (parts.length < 2 || parts[0] !== "vault") return null;
 	const vaultId = parts[1];
 	if (!vaultId) return null;
 	return {
 		vaultId: decodeURIComponent(vaultId),
-		rest: parts.slice(2),
+		resource: parts[2] ?? null,
+		rest: parts.slice(3),
 	};
 }
 
-function isWebSocketRequest(req: Request): boolean {
-	return (req.headers.get("Upgrade") ?? "").toLowerCase() === "websocket";
-}
-
-function rejectSocket(
-	req: Request,
-	code: FatalAuthCode,
-	details: Record<string, unknown> = {},
-): Response {
-	if (!isWebSocketRequest(req)) {
-		return json(
-			{ error: code },
-			code === "unauthorized"
-				? 401
-				: code === "update_required"
-					? 426
-					: 503,
-		);
+function classifyWorkerRoute(req: Request, url: URL): WorkerRoute {
+	if (
+		req.method === "OPTIONS"
+		&& (url.pathname.startsWith("/vault/") || url.pathname.startsWith("/api/"))
+	) {
+		return { kind: "cors-preflight" };
 	}
 
-	const pair = new WebSocketPair();
-	const client = pair[0];
-	const server = pair[1];
-	server.accept();
-	const payload = JSON.stringify({ type: "error", code, ...details });
-	// Send a plain JSON frame first for generic websocket clients/tests.
-	server.send(payload);
-	// y-partyserver clients consume string control messages via "__YPS:".
-	// Send fatal auth payload through that channel so plugins can fail loudly.
-	server.send(`__YPS:${payload}`);
-	server.close(
-		1008,
-		code === "unauthorized"
-			? "unauthorized"
-			: code === "update_required"
-				? "update required"
-			: code === "unclaimed"
-				? "server unclaimed"
-				: "server misconfigured",
+	if (req.method === "GET" && url.pathname === "/") {
+		return { kind: "home" };
+	}
+
+	if (req.method === "GET" && url.pathname === "/mobile-setup") {
+		return { kind: "mobile-setup" };
+	}
+
+	if (req.method === "GET" && url.pathname === "/api/capabilities") {
+		return { kind: "capabilities" };
+	}
+
+	if (req.method === "POST" && url.pathname === "/claim") {
+		return { kind: "claim" };
+	}
+
+	if (req.method === "POST" && url.pathname === "/api/update-metadata") {
+		return { kind: "update-metadata" };
+	}
+
+	// parseSyncPath MUST run before parseVaultPath.  /vault/sync/:vaultId
+	// would otherwise be misread as vaultId="sync", resource=:vaultId and then
+	// rejected by the resource whitelist as not-found.
+	const syncRoute = parseSyncPath(url.pathname);
+	if (syncRoute) {
+		return { kind: "sync-socket", vaultId: syncRoute.vaultId };
+	}
+
+	const vaultRoute = parseVaultPath(url.pathname);
+	if (vaultRoute && vaultRoute.resource !== null) {
+		// Resource whitelist: unknown resources 404 before auth.
+		if (!VALID_VAULT_RESOURCES.has(vaultRoute.resource)) {
+			return { kind: "not-found" };
+		}
+		// Full shape validation: wrong method or unknown subpath also 404 before
+		// auth.  POST /debug/recent, GET /debug/evil, GET /auth/random, etc. are
+		// structurally invalid and must not touch YAOS_CONFIG or YAOS_SYNC.
+		if (!isKnownVaultRouteShape(req.method, vaultRoute.resource, vaultRoute.rest)) {
+			return { kind: "not-found" };
+		}
+		return {
+			kind: "vault",
+			vaultId: vaultRoute.vaultId,
+			resource: vaultRoute.resource,
+			rest: vaultRoute.rest,
+		};
+	}
+
+	return { kind: "not-found" };
+}
+
+// ── Route-bucket logging ──────────────────────────────────────────────────────
+//
+// One structured log line per Worker request.  Normalised path buckets only —
+// never raw vault IDs, tokens, or query strings.
+
+function routeBucket(route: WorkerRoute): string {
+	switch (route.kind) {
+		case "home": return "home";
+		case "mobile-setup": return "mobile_setup";
+		case "capabilities": return "api_capabilities";
+		case "claim": return "claim";
+		case "update-metadata": return "api_update_metadata";
+		case "sync-socket": return "vault_sync";
+		case "vault": return `vault_${route.resource}`;
+		case "not-found": return "not_found";
+		case "cors-preflight": return "cors_preflight";
+	}
+}
+
+function logWorkerRequest(args: {
+	route: WorkerRoute;
+	method: string;
+	status: number;
+	durationMs: number;
+	auth: "skipped" | "env" | "claim" | "unclaimed";
+	isWebSocket: boolean;
+	cfRay: string | null;
+}): void {
+	// Sample not_found at 1% — scanner/probe traffic is high-volume and
+	// an always-on access log for 404s turns into dashboard noise fast.
+	// All recognised YAOS routes are always logged for triage.
+	if (args.route.kind === "not-found" && Math.random() >= 0.01) {
+		return;
+	}
+	console.info(
+		"[yaos-worker] request " + JSON.stringify({
+			route: routeBucket(args.route),
+			method: args.method,
+			status: args.status,
+			durationMs: args.durationMs,
+			auth: args.auth,
+			isWebSocket: args.isWebSocket,
+			cfRay: args.cfRay ?? undefined,
+		}),
 	);
-	return new Response(null, {
-		status: 101,
-		webSocket: client,
-	});
 }
 
-async function hashToken(token: string): Promise<string> {
-	const bytes = new TextEncoder().encode(token);
-	return sha256Hex(bytes);
-}
-
-function supportsBuckets(env: Env): boolean {
-	return env.YAOS_BUCKET !== undefined;
-}
-
-function canonicalRepoForSetup(env: Env): string | undefined {
-	const raw = env.YAOS_CANONICAL_REPO?.trim();
-	if (!raw) return undefined;
-	return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(raw) ? raw : undefined;
-}
-
-async function getStoredServerConfig(env: Env): Promise<StoredServerConfig> {
-	const id = env.YAOS_CONFIG.idFromName("global-config");
-	const stub = env.YAOS_CONFIG.get(id);
-	const res = await stub.fetch("https://internal/__yaos/config");
-	if (!res.ok) {
-		throw new Error(`config fetch failed (${res.status})`);
-	}
-	return await res.json();
-}
-
-async function claimServerConfig(env: Env, tokenHash: string): Promise<boolean> {
-	const id = env.YAOS_CONFIG.idFromName("global-config");
-	const stub = env.YAOS_CONFIG.get(id);
-	const res = await stub.fetch("https://internal/__yaos/claim", {
-		method: "POST",
-		headers: {
-			"Content-Type": "application/json",
-		},
-		body: JSON.stringify({ tokenHash }),
-	});
-	return res.ok;
-}
-
-async function setServerUpdateMetadata(env: Env, metadata: {
-	updateProvider?: unknown;
-	updateRepoUrl?: unknown;
-	updateRepoBranch?: unknown;
-}): Promise<StoredServerConfig> {
-	const id = env.YAOS_CONFIG.idFromName("global-config");
-	const stub = env.YAOS_CONFIG.get(id);
-	const res = await stub.fetch("https://internal/__yaos/update-metadata", {
-		method: "POST",
-		headers: {
-			"Content-Type": "application/json",
-		},
-		body: JSON.stringify(metadata),
-	});
-	if (!res.ok) {
-		const body = await res.text().catch(() => "");
-		throw new Error(`update metadata write failed (${res.status})${body ? `: ${body}` : ""}`);
-	}
-	const payload: { config?: StoredServerConfig } = await res.json();
-	if (!payload?.config) {
-		throw new Error("update metadata write failed (missing config)");
-	}
-	return payload.config;
-}
-
-async function getAuthState(env: Env): Promise<AuthState> {
-	const envToken = env.SYNC_TOKEN?.trim();
-	if (envToken) {
-		return { mode: "env", claimed: true, envToken };
-	}
-
-	const config = await getStoredServerConfig(env);
-	if (config.claimed && typeof config.tokenHash === "string" && config.tokenHash.length > 0) {
-		return { mode: "claim", claimed: true, tokenHash: config.tokenHash };
-	}
-
-	return { mode: "unclaimed", claimed: false };
-}
-
-async function isAuthorized(
-	state: AuthState,
-	token: string | null,
-): Promise<boolean> {
-	if (!token) return false;
-	if (state.mode === "env") {
-		return token === state.envToken;
-	}
-	if (state.mode === "claim") {
-		return (await hashToken(token)) === state.tokenHash;
-	}
-	return false;
-}
-
-function buildObsidianSetupUrl(host: string, token: string, vaultId?: string): string {
-	const params = new URLSearchParams({
-		action: "setup",
-		host,
-		token,
-	});
-	if (vaultId) {
-		params.set("vaultId", vaultId);
-	}
-	return `obsidian://yaos?${params.toString()}`;
-}
-
-function getCapabilities(auth: AuthState, env: Env, config: StoredServerConfig | null = null): {
-	claimed: boolean;
-	authMode: "env" | "claim" | "unclaimed";
-	attachments: boolean;
-	snapshots: boolean;
-	serverVersion: string;
-	minPluginVersion: string | null;
-	recommendedPluginVersion: string | null;
-	minSchemaVersion: number | null;
-	maxSchemaVersion: number | null;
-	migrationRequired: boolean;
-	updateProvider: UpdateProvider | null;
-	updateRepoUrl: string | null;
-	updateRepoBranch: string | null;
-} {
-	const bucketEnabled = supportsBuckets(env);
-	return {
-		claimed: auth.claimed,
-		authMode: auth.mode,
-		attachments: bucketEnabled,
-		snapshots: bucketEnabled,
-		serverVersion: SERVER_VERSION,
-		minPluginVersion: SERVER_MIN_PLUGIN_VERSION,
-		recommendedPluginVersion: SERVER_RECOMMENDED_PLUGIN_VERSION,
-		minSchemaVersion: SERVER_MIN_SCHEMA_VERSION,
-		maxSchemaVersion: SERVER_MAX_SCHEMA_VERSION,
-		migrationRequired: SERVER_MIGRATION_REQUIRED,
-		updateProvider: config?.updateProvider ?? null,
-		updateRepoUrl: config?.updateRepoUrl ?? null,
-		updateRepoBranch: config?.updateRepoBranch ?? null,
-	};
-}
-
-async function recordVaultTrace(
-	env: Env,
+// ── Pre-auth rejection helpers ────────────────────────────────────────────────
+//
+// Pre-auth rejection telemetry MUST NOT touch Durable Object storage
+// (INV-SEC-01, INV-OBS-02). Calls to recordVaultTrace from this path
+// would create or wake the DO and write a storage entry per unauthorized
+// request — the documented root cause of issue #40 (DO request explosion).
+//
+// Rejections are logged via console.warn so Cloudflare worker logs still
+// capture them, but no per-room state is mutated before authentication
+// succeeds.
+function logVaultRejection(
+	req: Request,
 	vaultId: string,
-	event: string,
-	data: Record<string, unknown> = {},
-): Promise<void> {
-	try {
-		const stub = await getServerByName(env.YAOS_SYNC, vaultId);
-		await stub.fetch("https://internal/__yaos/trace", {
-			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-			},
-			body: JSON.stringify({ event, data }),
-		});
-	} catch (err) {
-		console.warn(`${LOG_PREFIX} trace write failed:`, err);
-	}
+	reason: "unclaimed" | "server_misconfigured" | "unauthorized",
+): void {
+	// Truncate vaultId so it cannot become a correlation handle in exported
+	// worker logs, while still being useful for debugging.
+	const vaultIdHint = vaultId.slice(0, 8);
+	console.warn(
+		`${LOG_PREFIX} vault rejected pre-auth: ` +
+		JSON.stringify({ vaultIdHint, reason, method: req.method }),
+	);
 }
 
-async function fetchVaultDocument(env: Env, vaultId: string): Promise<Uint8Array> {
-	const stub = await getServerByName(env.YAOS_SYNC, vaultId);
-	const res = await stub.fetch("https://internal/__yaos/document");
-	if (!res.ok) {
-		throw new Error(`document fetch failed (${res.status})`);
+async function rejectAndLogUnauthorizedVaultRequest(
+	req: Request,
+	env: Env,
+	authState: AuthState,
+	vaultId: string,
+): Promise<Response | null> {
+	const rejection = await rejectUnauthorizedVaultRequest(req, env, authState, vaultId);
+	if (rejection) {
+		logVaultRejection(req, vaultId, rejection.reason);
 	}
-	return new Uint8Array(await res.arrayBuffer());
+	return rejection?.response ?? null;
 }
 
-async function fetchVaultRoomMeta(env: Env, vaultId: string): Promise<{
-	schemaVersion: number | null;
-} | null> {
-	const stub = await getServerByName(env.YAOS_SYNC, vaultId);
-	const res = await stub.fetch("https://internal/__yaos/meta");
-	if (!res.ok) {
-		throw new Error(`room meta fetch failed (${res.status})`);
-	}
-	const payload: {
-		meta?: { schemaVersion?: unknown } | null;
-	} = await res.json();
-	const schemaVersion = payload?.meta?.schemaVersion;
-	if (schemaVersion === null) {
-		return { schemaVersion: null };
-	}
-	if (typeof schemaVersion === "number" && Number.isInteger(schemaVersion) && schemaVersion >= 0) {
-		return { schemaVersion };
+// ── Capabilities ──────────────────────────────────────────────────────────────
+
+/**
+ * Extract the StoredServerConfig carried in the AuthState (claim/unclaimed
+ * modes only — env mode has no config).  Returns null for env mode or when
+ * the config was not populated (e.g. old uncached getAuthState callers).
+ *
+ * When called with AuthStateCached (the return of getAuthStateCached), config
+ * is always present for claim/unclaimed modes — no ?? null needed.
+ */
+function getConfigFromAuthState(authState: AuthStateCached): StoredServerConfig | null {
+	if (authState.mode === "claim" || authState.mode === "unclaimed") {
+		return authState.config;
 	}
 	return null;
 }
 
-async function fetchVaultSchemaVersion(env: Env, vaultId: string): Promise<number | null> {
-	try {
-		const meta = await fetchVaultRoomMeta(env, vaultId);
-		if (meta) {
-			return meta.schemaVersion;
-		}
-		const update = await fetchVaultDocument(env, vaultId);
-		const doc = new Y.Doc();
+async function handleCapabilities(req: Request, env: Env, authState: AuthStateCached): Promise<Response> {
+	// Prefer the config already carried in the AuthState (populated by
+	// getAuthStateCached in claim/unclaimed modes — zero extra DO calls).
+	let config = getConfigFromAuthState(authState);
+
+	if (!config) {
+		// env mode: getAuthStateCached returns early without fetching config,
+		// so we fetch it here with the same cached path.
 		try {
-			Y.applyUpdate(doc, update);
-			const stored = doc.getMap("sys").get("schemaVersion");
-			if (typeof stored === "number" && Number.isInteger(stored) && stored >= 0) {
-				return stored;
-			}
-			return null;
-		} finally {
-			doc.destroy();
+			config = await getStoredServerConfigCached(env);
+		} catch (err) {
+			console.warn(`${LOG_PREFIX} config fetch failed for capabilities:`, err);
 		}
-	} catch (err) {
-		console.warn(`${LOG_PREFIX} schema probe failed:`, err);
-		return null;
 	}
+
+	const includePrivateUpdateMetadata = authState.claimed
+		&& await isAuthorized(authState, getHttpAuthToken(req));
+	return json(getCapabilities(authState, env, config, { includePrivateUpdateMetadata }));
 }
 
-async function fetchVaultDebug(env: Env, vaultId: string): Promise<Response> {
-	const stub = await getServerByName(env.YAOS_SYNC, vaultId);
-	return await stub.fetch("https://internal/__yaos/debug");
-}
-
-async function handleBlobExists(
-	env: Env,
-	vaultId: string,
-	req: Request,
-): Promise<Response> {
-	const bucket = env.YAOS_BUCKET;
-	if (!bucket) {
-		return json({ error: "attachments_unavailable" }, 503);
-	}
-
-	let body: { hashes?: string[] };
-	try {
-		body = await req.json();
-	} catch {
-		return json({ error: "invalid json" }, 400);
-	}
-
-	if (!Array.isArray(body.hashes)) {
-		return json({ error: "missing hashes array" }, 400);
-	}
-
-	const hashes = body.hashes
-		.slice(0, EXISTS_BATCH_LIMIT)
-		.filter((hash): hash is string => typeof hash === "string" && isValidHash(hash));
-
-	const present = await mapWithConcurrency(
-		hashes,
-		R2_HEAD_CONCURRENCY,
-		async (hash) => {
-			const object = await bucket.head(blobKey(vaultId, hash));
-			return object ? hash : null;
-		},
-	);
-
-	return json({
-		present: present.filter((hash): hash is string => hash !== null),
-	});
-}
-
-async function handleBlobUpload(
-	env: Env,
-	vaultId: string,
-	hash: string,
-	req: Request,
-): Promise<Response> {
-	if (!env.YAOS_BUCKET) {
-		return json({ error: "attachments_unavailable" }, 503);
-	}
-
-	if (!isValidHash(hash)) {
-		return json({ error: "invalid hash: must be 64 hex chars (SHA-256)" }, 400);
-	}
-
-	const body = await req.arrayBuffer();
-	if (!body.byteLength) {
-		return json({ error: "missing request body" }, 400);
-	}
-	if (body.byteLength > MAX_BLOB_UPLOAD_BYTES) {
-		return json({
-			error: `contentLength exceeds max upload size (${MAX_BLOB_UPLOAD_BYTES} bytes)`,
-		}, 413);
-	}
-
-	await env.YAOS_BUCKET.put(
-		blobKey(vaultId, hash),
-		body,
-		{
-			httpMetadata: {
-				contentType: req.headers.get("Content-Type") ?? "application/octet-stream",
-			},
-		},
-	);
-
-	return new Response(null, { status: 204 });
-}
-
-async function handleBlobDownload(
-	env: Env,
-	vaultId: string,
-	hash: string,
-): Promise<Response> {
-	if (!env.YAOS_BUCKET) {
-		return json({ error: "attachments_unavailable" }, 503);
-	}
-
-	if (!isValidHash(hash)) {
-		return json({ error: "invalid hash: must be 64 hex chars (SHA-256)" }, 400);
-	}
-
-	const object = await env.YAOS_BUCKET.get(blobKey(vaultId, hash));
-	if (!object) {
-		return json({ error: "not found" }, 404);
-	}
-
-	const headers = new Headers({
-		"Cache-Control": "no-store",
-	});
-	if (object.httpMetadata?.contentType) {
-		headers.set("Content-Type", object.httpMetadata.contentType);
-	} else {
-		headers.set("Content-Type", "application/octet-stream");
-	}
-
-	return new Response(object.body, { headers });
-}
-
-async function createSnapshotFromLiveDoc(
-	env: Env,
-	vaultId: string,
-	triggeredBy?: string,
-): Promise<SnapshotResult> {
-	if (!env.YAOS_BUCKET) {
-		return {
-			status: "unavailable",
-			reason: "R2 bucket not configured",
-		};
-	}
-
-	const update = await fetchVaultDocument(env, vaultId);
-	const doc = new Y.Doc();
-	if (update.byteLength > 0) {
-		Y.applyUpdate(doc, update);
-	}
-
-	const index = await createSnapshot(doc, vaultId, env.YAOS_BUCKET, triggeredBy);
-	return {
-		status: "created",
-		snapshotId: index.snapshotId,
-		index,
-	};
-}
+// ── Worker ────────────────────────────────────────────────────────────────────
 
 const worker = {
 	async fetch(req: Request, env: Env): Promise<Response> {
+		const start = Date.now();
 		const url = new URL(req.url);
-		if (
-			req.method === "OPTIONS"
-			&& (url.pathname.startsWith("/vault/") || url.pathname.startsWith("/api/"))
-		) {
-			return corsPreflight();
+		const route = classifyWorkerRoute(req, url);
+		const isWebSocket = req.headers.get("upgrade")?.toLowerCase() === "websocket";
+		const cfRay = req.headers.get("cf-ray");
+
+		// Unknown routes 404 immediately — no YAOS_CONFIG, no YAOS_SYNC.
+		// This is the primary fix for issue #40: scanner/probe traffic no longer
+		// wakes Durable Objects.
+		if (route.kind === "cors-preflight") {
+			const response = corsPreflight();
+			logWorkerRequest({ route, method: req.method, status: response.status, durationMs: Date.now() - start, auth: "skipped", isWebSocket, cfRay });
+			return response;
 		}
 
-		const authState = await getAuthState(env);
+		if (route.kind === "not-found") {
+			const response = withCors(json({ error: "not found" }, 404));
+			logWorkerRequest({ route, method: req.method, status: 404, durationMs: Date.now() - start, auth: "skipped", isWebSocket, cfRay });
+			return response;
+		}
 
-		if (req.method === "GET" && url.pathname === "/") {
+		// Only recognised routes reach this point.
+		const authState = await getAuthStateCached(env);
+		let response: Response;
+
+		if (route.kind === "home") {
 			const body = authState.claimed
 				? renderRunningPage({
 					host: url.origin,
@@ -554,326 +379,55 @@ const worker = {
 					host: url.origin,
 					deployRepo: canonicalRepoForSetup(env),
 				});
-			return html(body);
-		}
-
-		if (req.method === "GET" && url.pathname === "/mobile-setup") {
-			return html(
+			response = html(body);
+		} else if (route.kind === "mobile-setup") {
+			response = html(
 				renderMobileSetupPage({
 					host: url.origin,
 					deployRepo: canonicalRepoForSetup(env),
 				}),
 			);
-		}
+		} else if (route.kind === "capabilities") {
+			response = withCors(await handleCapabilities(req, env, authState));
+		} else if (route.kind === "claim") {
+			response = await handleClaimRoute(req, env, authState);
+		} else if (route.kind === "update-metadata") {
+			response = withCors(await handleUpdateMetadataRoute(req, env, authState));
+		} else if (route.kind === "sync-socket") {
+			response = await handleSyncSocketRoute(req, env, authState, route.vaultId);
+		} else {
+			// route.kind === "vault"
+			const { vaultId, resource, rest } = route;
 
-		if (req.method === "GET" && url.pathname === "/api/capabilities") {
-			let config: StoredServerConfig | null = null;
-			try {
-				config = await getStoredServerConfig(env);
-			} catch (err) {
-				console.warn(`${LOG_PREFIX} config fetch failed for capabilities:`, err);
-			}
-			return withCors(json(getCapabilities(authState, env, config)));
-		}
-
-		if (req.method === "POST" && url.pathname === "/claim") {
-			if (authState.claimed) {
-				return json({ error: "already_claimed" }, 403);
-			}
-
-			let body: { token?: string; vaultId?: string } = {};
-			try {
-				body = await req.json();
-			} catch {
-				return json({ error: "invalid json" }, 400);
-			}
-
-			if (typeof body.token !== "string" || body.token.trim().length < 32) {
-				return json({ error: "invalid token" }, 400);
-			}
-			if (body.vaultId !== undefined && (typeof body.vaultId !== "string" || body.vaultId.trim().length < 8)) {
-				return json({ error: "invalid vaultId" }, 400);
-			}
-
-			const token = body.token.trim();
-			const vaultId = typeof body.vaultId === "string" ? body.vaultId.trim() : "";
-			const tokenHash = await hashToken(token);
-			const claimed = await claimServerConfig(env, tokenHash);
-			if (!claimed) {
-				return json({ error: "already_claimed" }, 403);
-			}
-
-			let claimedConfig: StoredServerConfig | null = null;
-			try {
-				claimedConfig = await getStoredServerConfig(env);
-			} catch (err) {
-				console.warn(`${LOG_PREFIX} config fetch failed after claim:`, err);
-			}
-
-			return json({
-				ok: true,
-				host: url.origin,
-				obsidianUrl: buildObsidianSetupUrl(url.origin, token, vaultId || undefined),
-				capabilities: getCapabilities({ mode: "claim", claimed: true, tokenHash }, env, claimedConfig),
-			});
-		}
-
-		if (req.method === "POST" && url.pathname === "/api/update-metadata") {
-			const token = getHttpAuthToken(req);
-			if (!authState.claimed) {
-				return withCors(json({ error: "unclaimed" }, 503));
-			}
-			if (authState.mode === "env" && !authState.envToken) {
-				return withCors(json({ error: "server_misconfigured" }, 503));
-			}
-			if (!(await isAuthorized(authState, token))) {
-				return withCors(json({ error: "unauthorized" }, 401));
-			}
-
-			let body: {
-				updateProvider?: unknown;
-				updateRepoUrl?: unknown;
-				updateRepoBranch?: unknown;
-			} = {};
-			try {
-				body = await req.json();
-			} catch {
-				return withCors(json({ error: "invalid json" }, 400));
-			}
-
-			let updatedConfig: StoredServerConfig;
-			try {
-				updatedConfig = await setServerUpdateMetadata(env, body);
-			} catch (err) {
-				const message = err instanceof Error ? err.message : "metadata write failed";
-				const status = message.includes("(403)")
-					? 403
-					: message.includes("(400)")
-						? 400
-						: 500;
-				return withCors(json({ error: message }, status));
-			}
-
-			return withCors(json({
-				ok: true,
-				capabilities: getCapabilities(authState, env, updatedConfig),
-			}));
-		}
-
-		const syncRoute = parseSyncPath(url.pathname);
-
-		if (syncRoute) {
-			const token = getSocketAuthToken(req);
-			const clientSchema = parseClientSchemaVersion(url);
-			if (!authState.claimed) {
-				await recordVaultTrace(env, syncRoute.vaultId, "ws-rejected", {
-					reason: "unclaimed",
-				});
-				const response = rejectSocket(req, "unclaimed");
-				return isWebSocketRequest(req) ? response : withCors(response);
-			}
-			if (authState.mode === "env" && !authState.envToken) {
-				await recordVaultTrace(env, syncRoute.vaultId, "ws-rejected", {
-					reason: "server_misconfigured",
-				});
-				const response = rejectSocket(req, "server_misconfigured");
-				return isWebSocketRequest(req) ? response : withCors(response);
-			}
-			if (!(await isAuthorized(authState, token))) {
-				await recordVaultTrace(env, syncRoute.vaultId, "ws-rejected", {
-					reason: "unauthorized",
-				});
-				const response = rejectSocket(req, "unauthorized");
-				return isWebSocketRequest(req) ? response : withCors(response);
-			}
-			if (!clientSchema) {
-				await recordVaultTrace(env, syncRoute.vaultId, "ws-rejected", {
-					reason: "update_required",
-					detail: "invalid_client_schema",
-					rawSchema: url.searchParams.get("schemaVersion") ?? url.searchParams.get("schema") ?? null,
-				});
-				const response = rejectSocket(req, "update_required", {
-					reason: "invalid_client_schema",
-					clientSchemaVersion: null,
-					roomSchemaVersion: null,
-				});
-				return isWebSocketRequest(req) ? response : withCors(response);
-			}
-
-			const roomSchemaVersion = await fetchVaultSchemaVersion(env, syncRoute.vaultId);
-			if (roomSchemaVersion !== null && clientSchema.version < roomSchemaVersion) {
-				await recordVaultTrace(env, syncRoute.vaultId, "ws-rejected", {
-					reason: "update_required",
-					detail: "client_schema_older_than_room",
-					clientSchemaVersion: clientSchema.version,
-					clientSchemaSource: clientSchema.source,
-					roomSchemaVersion,
-				});
-				const response = rejectSocket(req, "update_required", {
-					reason: "client_schema_older_than_room",
-					clientSchemaVersion: clientSchema.version,
-					roomSchemaVersion,
-				});
-				return isWebSocketRequest(req) ? response : withCors(response);
-			}
-
-			await recordVaultTrace(env, syncRoute.vaultId, "ws-connected", {
-				userAgent: req.headers.get("user-agent") ?? undefined,
-				cfRay: req.headers.get("cf-ray") ?? undefined,
-				clientSchemaVersion: clientSchema.version,
-				clientSchemaSource: clientSchema.source,
-				roomSchemaVersion,
-			});
-
-			const stub = await getServerByName(env.YAOS_SYNC, syncRoute.vaultId);
-			return await stub.fetch(req);
-		}
-
-		const vaultRoute = parseVaultPath(url.pathname);
-		if (!vaultRoute) {
-			return withCors(json({ error: "not found" }, 404));
-		}
-
-		const token = getHttpAuthToken(req);
-		if (!authState.claimed) {
-			await recordVaultTrace(env, vaultRoute.vaultId, "http-rejected", {
-				reason: "unclaimed",
-				method: req.method,
-				path: url.pathname,
-			});
-			return withCors(json({ error: "unclaimed" }, 503));
-		}
-		if (authState.mode === "env" && !authState.envToken) {
-			await recordVaultTrace(env, vaultRoute.vaultId, "http-rejected", {
-				reason: "server_misconfigured",
-				method: req.method,
-				path: url.pathname,
-			});
-			return withCors(json({ error: "server_misconfigured" }, 503));
-		}
-		if (!(await isAuthorized(authState, token))) {
-			await recordVaultTrace(env, vaultRoute.vaultId, "http-unauthorized", {
-				method: req.method,
-				path: url.pathname,
-			});
-			return withCors(json({ error: "unauthorized" }, 401));
-		}
-
-		const [resource, ...rest] = vaultRoute.rest;
-		if (!resource) {
-			return withCors(json({ error: "not found" }, 404));
-		}
-
-		if (resource === "debug" && req.method === "GET" && rest[0] === "recent") {
-			return withCors(await fetchVaultDebug(env, vaultRoute.vaultId));
-		}
-
-		if (resource === "blobs") {
-			if (req.method === "POST" && rest[0] === "exists") {
-				return withCors(await handleBlobExists(env, vaultRoute.vaultId, req));
-			}
-
-				const hash = rest[0];
-				if (!hash) {
-					return withCors(json({ error: "not found" }, 404));
-				}
-
-			if (req.method === "PUT" && rest.length === 1) {
-				return withCors(await handleBlobUpload(env, vaultRoute.vaultId, hash, req));
-			}
-
-			if (req.method === "GET" && rest.length === 1) {
-				return withCors(await handleBlobDownload(env, vaultRoute.vaultId, hash));
-			}
-		}
-
-		if (resource === "snapshots") {
-			if (req.method === "POST" && rest.length === 0) {
-				let body: { device?: string } = {};
-				try {
-					body = await req.json();
-				} catch {
-					body = {};
-				}
-
-				const result = await createSnapshotFromLiveDoc(
-					env,
-					vaultRoute.vaultId,
-					body.device,
-				);
-				if (result.status === "unavailable") {
-					return withCors(json(result));
-				}
-				await recordVaultTrace(env, vaultRoute.vaultId, "snapshot-created-manual", {
-					snapshotId: result.snapshotId,
-					triggeredBy: body.device,
-				});
-				return withCors(json(result));
-			}
-
-			if (req.method === "POST" && rest[0] === "maybe" && rest.length === 1) {
-				let body: { device?: string } = {};
-				try {
-					body = await req.json();
-				} catch {
-					body = {};
-				}
-
-				const stub = await getServerByName(env.YAOS_SYNC, vaultRoute.vaultId);
-				const res = await stub.fetch("https://internal/__yaos/snapshot-maybe", {
-					method: "POST",
-					headers: {
-						"Content-Type": "application/json",
-					},
-					body: JSON.stringify(body),
-				});
-				const result = await res.json() as SnapshotResult;
-				await recordVaultTrace(env, vaultRoute.vaultId, "snapshot-created", {
-					status: result.status,
-					snapshotId: result.snapshotId,
-					triggeredBy: body.device,
-				});
-				return withCors(json(result));
-			}
-
-			if (req.method === "GET" && rest.length === 0) {
-				if (!env.YAOS_BUCKET) {
-					return withCors(json({ error: "snapshots_unavailable" }, 503));
-				}
-
-				const snapshots = await listSnapshots(vaultRoute.vaultId, env.YAOS_BUCKET);
-				return withCors(json({ snapshots }));
-			}
-
-			if (req.method === "GET" && rest.length === 1) {
-				if (!env.YAOS_BUCKET) {
-					return withCors(json({ error: "snapshots_unavailable" }, 503));
-				}
-
-				const snapshotId = rest[0];
-				if (!snapshotId) {
-					return withCors(json({ error: "missing_snapshot_id" }, 400));
-				}
-				const result = await getSnapshotPayload(
-					vaultRoute.vaultId,
-					snapshotId,
-					env.YAOS_BUCKET,
-				);
-				if (!result) {
-					return withCors(json({ error: "not found" }, 404));
-				}
-
-				return withCors(new Response(result.payload, {
-					headers: {
-						"Content-Type": "application/gzip",
-						"Cache-Control": "no-store",
-						"X-YAOS-Snapshot-Day": result.index.day,
-					},
+			const authFailure = await rejectAndLogUnauthorizedVaultRequest(req, env, authState, vaultId);
+			if (authFailure) {
+				response = withCors(authFailure);
+			} else if (resource === "debug" && req.method === "GET" && rest[0] === "recent") {
+				response = withCors(await fetchVaultDebug(env, vaultId));
+			} else if (resource === "auth" && rest[0] === "ticket" && req.method === "POST") {
+				response = withCors(await handleTicketRoute(req, authState, vaultId, json, env));
+			} else if (resource === "blobs") {
+				response = withCors(await handleBlobRoute(env, vaultId, req, rest, json));
+			} else if (resource === "snapshots") {
+				response = withCors(await handleSnapshotRoute(env, vaultId, req, rest, json, {
+					fetchVaultDocument,
+					recordVaultTrace,
 				}));
+			} else {
+				response = withCors(json({ error: "not found" }, 404));
 			}
 		}
 
-		return withCors(json({ error: "not found" }, 404));
+		logWorkerRequest({
+			route,
+			method: req.method,
+			status: response.status,
+			durationMs: Date.now() - start,
+			auth: authState.mode,
+			isWebSocket,
+			cfRay,
+		});
+		return response;
 	},
 };
 

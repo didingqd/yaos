@@ -1,3 +1,12 @@
+/**
+ * Bounded-concurrency parallel map.
+ *
+ * SOURCE OF TRUTH: src/shared/concurrency.ts
+ *
+ * This file exists because the server build boundary (server/tsconfig.json)
+ * cannot import from the client src/ tree. The function body must remain
+ * identical to the canonical implementation. If you change one, change both.
+ */
 export async function mapWithConcurrency<T, R>(
 	items: readonly T[],
 	limit: number,
@@ -11,14 +20,11 @@ export async function mapWithConcurrency<T, R>(
 
 	async function runWorker(): Promise<void> {
 		while (true) {
-			const index = nextIndex;
-			nextIndex++;
+			const index = nextIndex++;
 			if (index >= items.length) return;
-				const item = items[index];
-				if (item === undefined) return;
-				results[index] = await worker(item, index);
-			}
+			results[index] = await worker(items[index] as T, index);
 		}
+	}
 
 	await Promise.all(
 		Array.from({ length: normalizedLimit }, () => runWorker()),

@@ -2,15 +2,28 @@ import { type App, arrayBufferToHex, MarkdownView, TFile, normalizePath } from "
 import * as Y from "yjs";
 import type { VaultSync } from "./vaultSync";
 import type { EditorBindingManager } from "./editorBinding";
-import { ORIGIN_SEED } from "../types";
-import { ORIGIN_RESTORE } from "./snapshotClient";
-import type { TraceRecord } from "../debug/trace";
+import type { TraceRecord } from "../observability/traceContext";
+import { getMetaPath, isFileMetaDeletedValue } from "./fileMeta";
+import type { MetaChangeBatch } from "./fileMeta";
 import { formatUnknown, yTextToString } from "../utils/format";
 import {
 	isFrontmatterBlocked,
 	validateFrontmatterTransition,
 	type FrontmatterValidationResult,
 } from "./frontmatterGuard";
+import { isLocalOrigin } from "./origins";
+import { contentBaselineHash } from "./diskIndex";
+import { PreservedUnresolvedRegistry, type PreservedUnresolvedEntry, type PreservedUnresolvedReason } from "./preservedUnresolved";
+export { isLocalOrigin };
+
+/**
+ * Three-way decision for remote-delete handling.
+ * Discriminated union — NOT a boolean dirty flag.
+ */
+export type RemoteDeleteDecision =
+	| { kind: "apply-delete" }
+	| { kind: "preserve-revive"; diskContent: string }
+	| { kind: "preserve-unresolved" };
 
 /**
  * Handles writeback from Y.Text -> disk with:
@@ -27,30 +40,6 @@ const OPEN_FILE_ACTIVE_GRACE_MS = 1200;
 const SUPPRESS_MS = 500;
 const MAX_CONCURRENT_WRITES = 5;
 const BURST_THRESHOLD = 20;
-
-/** String origins that should NOT trigger a disk write. */
-const LOCAL_STRING_ORIGINS = new Set([
-	ORIGIN_SEED,
-	"disk-sync",
-	ORIGIN_RESTORE,
-]);
-
-/**
- * Determine whether a Yjs transaction origin is local (should NOT trigger
- * a disk write).
- *
- * The sync provider applies remote updates with `transactionOrigin = provider`.
- * y-codemirror applies local editor updates with `transactionOrigin = YSyncConfig`.
- *
- * We only treat provider-origin transactions as remote.
- */
-function isLocalOrigin(origin: unknown, provider: unknown): boolean {
-	if (origin === provider) return false; // remote update from server
-	if (typeof origin === "string") return LOCAL_STRING_ORIGINS.has(origin);
-	if (origin == null) return true; // local transact() without explicit origin
-	// Non-null object origins (e.g. y-codemirror's YSyncConfig) are local.
-	return true;
-}
 
 function describeOrigin(origin: unknown, provider: unknown): string {
 	if (origin === provider) return "provider-remote";
@@ -71,13 +60,58 @@ interface SuppressionEntry {
 	expectedHash?: string;
 }
 
+function hashPrefix(hash: string | null | undefined): string | null {
+	return typeof hash === "string" ? hash.slice(0, 12) : null;
+}
+
 export class DiskMirror {
 	private suppressedPaths = new Map<string, SuppressionEntry>();
 	private openPaths = new Set<string>();
 
+	/**
+	 * Tracks new paths being renamed by DiskMirror in response to remote
+	 * metadata changes (handleRemoteRename). Consumed by the vault rename
+	 * event handler in main.ts via consumeRemoteRename(), which both reads
+	 * and removes the marker in a single call (consume-on-use, matching the
+	 * suppressedPaths / consumeDeleteSuppression pattern).
+	 */
+	private _pendingRemoteRenameNewPaths = new Set<string>();
+
+	/**
+	 * Consume the remote-rename marker for `newPath` if present.
+	 * Returns true if the rename was DiskMirror-originated (passive receiver).
+	 * Removes the marker atomically — safe to call from the vault rename handler.
+	 *
+	 * @internal Used by main.ts vault rename handler.
+	 */
+	consumeRemoteRename(newPath: string): boolean {
+		const normalized = normalizePath(newPath);
+		if (this._pendingRemoteRenameNewPaths.has(normalized)) {
+			this._pendingRemoteRenameNewPaths.delete(normalized);
+			return true;
+		}
+		return false;
+	}
+
 	/** Deduped write queue. Order doesn't matter — deduplication does. */
 	private writeQueue = new Set<string>();
 	private forcedWritePaths = new Set<string>();
+
+	/**
+	 * Paths where a remote-delete was received but no baseline was available
+	 * to verify local state. These files were preserved on disk to avoid data
+	 * loss, but must NOT be auto-revived by later import/scan passes.
+	 *
+	 * A path is removed from this set when:
+	 * - The user explicitly edits/creates the file (vault modify/create event)
+	 * - The file is deleted locally by the user
+	 * - A future remote-delete arrives with a real baseline
+	 *
+	 * This prevents `importUntrackedFiles()` or reconcile scans from
+	 * accidentally resurrecting a legitimately deleted file.
+	 */
+	private preservedUnresolved: PreservedUnresolvedRegistry;
+	readonly preservedUnresolvedPaths: ReadonlySet<string>;
 	/** Debounce timers per path. */
 	private debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	private openWriteTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -94,6 +128,26 @@ export class DiskMirror {
 	>();
 
 	private mapObserverCleanups: (() => void)[] = [];
+
+	private _flightEventHandler: ((event: Record<string, unknown>) => void) | null = null;
+
+	/**
+	 * Called after every successful `flushWrite` with the normalized path and
+	 * the SHA-256 content hash of what was written.
+	 *
+	 * The hash is pre-computed here (where the content is in scope) to keep
+	 * the caller free of crypto concerns. Use to update disk index baselines.
+	 */
+	private _onDiskWriteCallback: ((path: string, contentHash: string) => void) | null = null;
+
+	/**
+	 * Per-path timestamp of the most recent successful `flushWrite`. Updated
+	 * on every `vault.modify` and `vault.create` we issue. Read by the main
+	 * vault.on("modify") handler so `disk.modify.observed` events can carry
+	 * a writerGuess (yaos-write vs external) for RCA. See spec:
+	 * .kiro/specs/editor-bound-localonly-amplifier-guard/requirements.md (R8).
+	 */
+	private lastDiskWriteOkAt = new Map<string, number>();
 
 	private readonly debug: boolean;
 
@@ -112,8 +166,29 @@ export class DiskMirror {
 			previousContent: string | null,
 			nextContent: string,
 		) => void,
+		private getDeviceName: () => string = () => "unknown-device",
+		initialPreservedUnresolved: PreservedUnresolvedEntry[] = [],
+		private onPreservedUnresolvedChanged?: () => void,
 	) {
 		this.debug = debug;
+		this.preservedUnresolved = new PreservedUnresolvedRegistry(
+			initialPreservedUnresolved.filter((entry) => entry.kind === "markdown"),
+		);
+		this.preservedUnresolvedPaths = this.preservedUnresolved.paths;
+	}
+
+	setFlightEventHandler(handler: (event: Record<string, unknown>) => void): void {
+		this._flightEventHandler = handler;
+	}
+
+	/**
+	 * Register a callback that fires after every successful `flushWrite`.
+	 * The callback receives the normalized path and the SHA-256 hash of the
+	 * content written (pre-computed in diskMirror to avoid redundant re-reads).
+	 * Use this to update content-hash baselines in the disk index.
+	 */
+	setDiskWriteCallback(callback: (path: string, contentHash: string) => void): void {
+		this._onDiskWriteCallback = callback;
 	}
 
 	// -------------------------------------------------------------------
@@ -121,46 +196,57 @@ export class DiskMirror {
 	// -------------------------------------------------------------------
 
 	startMapObservers(): void {
-		const metaObserver = (event: import("yjs").YMapEvent<import("../types").FileMeta>) => {
-			if (isLocalOrigin(event.transaction.origin, this.vaultSync.provider)) {
-				return;
+		// ---------------------------------------------------------------
+		// Semantic metadata observer.
+		//
+		// Subscribes to pre-classified MetaSemanticChange events from
+		// VaultSync.observeMetaChanges(), which is powered by observeDeep
+		// internally. This correctly fires for both flat (v2) object
+		// replacements AND nested Y.Map field mutations (v3), where a
+		// shallow meta.observe() would have silently dropped the event.
+		// ---------------------------------------------------------------
+		const unsubscribeMetaChanges = this.vaultSync.observeMetaChanges((batch) => {
+			// Only react to remote changes. Local metadata writes (disk sync,
+			// seed, restore) must not feed back into DiskMirror as remote events.
+			if (batch.isLocal) return;
+
+			for (const change of batch.changes) {
+				switch (change.kind) {
+					case "deleted": {
+						const path = normalizePath(change.path);
+						const baselineText = this.vaultSync.idToText.get(change.fileId)?.toString() ?? null;
+						void this.handleRemoteDelete(path, { baselineText });
+						break;
+					}
+					case "revived": {
+						this.scheduleWrite(normalizePath(change.path));
+						break;
+					}
+					case "path-changed": {
+						// Only rename on disk when the entry is active.
+						// Tombstone path changes (e.g. from migrateSchemaToV2) must not
+						// trigger a disk rename — there is no live file to rename.
+						if (!change.isDeleted) {
+							void this.handleRemoteRename(
+								normalizePath(change.previousPath),
+								normalizePath(change.nextPath),
+							);
+						}
+						break;
+					}
+					case "added": {
+						// New file received from remote — schedule write if active.
+						if (!change.next.deletedAt && !change.next.deleted) {
+							this.scheduleWrite(normalizePath(change.next.path));
+						}
+						break;
+					}
+					// mtime-changed, device-changed, removed, invalid:
+					// no disk side effect needed.
+				}
 			}
-			event.changes.keys.forEach((change, fileId) => {
-				const oldMeta = change.oldValue as import("../types").FileMeta | undefined;
-				const newMeta = this.vaultSync.meta.get(fileId);
-				const oldPath = typeof oldMeta?.path === "string" ? normalizePath(oldMeta.path) : null;
-				const newPath = typeof newMeta?.path === "string" ? normalizePath(newMeta.path) : null;
-				const wasDeleted = this.vaultSync.isFileMetaDeleted(oldMeta);
-				const isDeleted = this.vaultSync.isFileMetaDeleted(newMeta);
-
-				// Remote tombstone transition.
-				if (newPath && isDeleted && !wasDeleted) {
-					void this.handleRemoteDelete(newPath);
-					return;
-				}
-
-				// Remote undelete/restore transition.
-				if (newPath && !isDeleted && wasDeleted) {
-					this.scheduleWrite(newPath);
-					return;
-				}
-
-				// Remote rename/move transition from meta.path.
-				if (oldPath && newPath && oldPath !== newPath && !isDeleted) {
-					void this.handleRemoteRename(oldPath, newPath);
-					return;
-				}
-
-				// Remote create/update where the file is active.
-				if ((change.action === "add" || change.action === "update") && newPath && !isDeleted) {
-					this.scheduleWrite(newPath);
-				}
-			});
-		};
-		this.vaultSync.meta.observe(metaObserver);
-		this.mapObserverCleanups.push(() =>
-			this.vaultSync.meta.unobserve(metaObserver),
-		);
+		});
+		this.mapObserverCleanups.push(unsubscribeMetaChanges);
 
 		// ---------------------------------------------------------------
 		// afterTransaction: catch remote content edits to CLOSED files.
@@ -183,13 +269,14 @@ export class DiskMirror {
 				if (!fileId) continue;
 
 				// Map fileId → path via meta (pathToId is path→id, not id→path)
-				const meta = this.vaultSync.meta.get(fileId);
-				if (!meta || this.vaultSync.isFileMetaDeleted(meta)) continue;
+				const metaValue = this.vaultSync.meta.get(fileId);
+				if (!metaValue || isFileMetaDeletedValue(metaValue)) continue;
 
-				const path = meta.path;
+				const path = getMetaPath(metaValue);
+				if (!path) continue;
 
-					// Skip if this path is already open (handled by per-file observer policy)
-					if (this.openPaths.has(path)) continue;
+				// Skip if this path is already open (handled by per-file observer policy)
+				if (this.openPaths.has(path)) continue;
 
 				this.log(`afterTxn: remote content change to closed file "${path}"`);
 				this.scheduleWrite(path);
@@ -461,6 +548,18 @@ export class DiskMirror {
 				await this.suppressWrite(path, content);
 				await this.app.vault.modify(existing, content);
 				this.log(`flushWrite: updated "${path}" (${content.length} chars)`);
+				this.lastDiskWriteOkAt.set(normalized, Date.now());
+				this._onDiskWriteCallback?.(normalized, await contentBaselineHash(content));
+				this._flightEventHandler?.({
+					priority: "important",
+					kind: "disk.write.ok",
+					severity: "info",
+					scope: "file",
+					source: "diskMirror",
+					layer: "disk",
+					path: normalized,
+					data: { contentLength: content.length, isCreate: false },
+				});
 			} else {
 				if (this.shouldBlockFrontmatterWrite(path, null, content)) {
 					return;
@@ -478,9 +577,31 @@ export class DiskMirror {
 				this.log(
 					`flushWrite: created "${path}" on disk (${content.length} chars)`,
 				);
+				this.lastDiskWriteOkAt.set(normalized, Date.now());
+				this._onDiskWriteCallback?.(normalized, await contentBaselineHash(content));
+				this._flightEventHandler?.({
+					priority: "important",
+					kind: "disk.write.ok",
+					severity: "info",
+					scope: "file",
+					source: "diskMirror",
+					layer: "disk",
+					path: normalized,
+					data: { contentLength: content.length, isCreate: true },
+				});
 			}
 		} catch (err) {
 			console.error(`[yaos] flushWrite failed for "${path}":`, err);
+			this._flightEventHandler?.({
+				priority: "critical",
+				kind: "disk.write.failed",
+				severity: "error",
+				scope: "file",
+				source: "diskMirror",
+				layer: "disk",
+				path: normalized,
+				data: { error: err instanceof Error ? err.message : String(err) },
+			});
 		}
 	}
 
@@ -509,42 +630,232 @@ export class DiskMirror {
 		return true;
 	}
 
-	private async handleRemoteDelete(path: string): Promise<void> {
+	private async handleRemoteDelete(
+		path: string,
+		options: { baselineText?: string | null } = {},
+	): Promise<void> {
 		const normalized = normalizePath(path);
 		const wasOpen = this.openPaths.has(normalized);
 		const wasObserved = this.textObservers.has(normalized);
 		const wasSuppressed = this.isSuppressed(normalized);
-		this.unobserveText(normalized);
-		this.openPaths.delete(normalized);
-		this.pendingOpenWrites.delete(normalized);
-		this.writeQueue.delete(normalized);
-		this.forcedWritePaths.delete(normalized);
-		const pending = this.debounceTimers.get(normalized);
-		if (pending) {
-			clearTimeout(pending);
-			this.debounceTimers.delete(normalized);
-		}
-		const openPending = this.openWriteTimers.get(normalized);
-		if (openPending) {
-			clearTimeout(openPending);
-			this.openWriteTimers.delete(normalized);
-		}
 		this.trace?.("disk", "remote-delete", {
 			path,
 			normalizedPath: normalized,
 			wasOpen,
 			wasObserved,
 			wasSuppressed,
+			hasBaselineText: options.baselineText !== undefined && options.baselineText !== null,
 		});
-		// Unbind editor before suppressed delete so the vault `delete` event
-		// (which skips unbind due to suppression) doesn't leave a stale binding.
-		this.editorBindings.unbindByPath(normalized);
+		// Flight: remote delete observed — emit before we know the outcome
+		this._flightEventHandler?.({
+			priority: "critical",
+			kind: "delete.remote.observed",
+			severity: "info",
+			scope: "file",
+			source: "diskMirror",
+			layer: "disk",
+			path: normalized,
+			data: { wasOpen, hasBaselineText: options.baselineText !== null && options.baselineText !== undefined },
+		});
 		const file = this.app.vault.getAbstractFileByPath(normalized);
 		if (file instanceof TFile) {
-			try {
-				this.suppressDelete(path);
-				await this.app.vault.delete(file);
-				this.log(`handleRemoteDelete: deleted "${path}" from disk`);
+				try {
+					// Remote delete decision: determine whether to delete, preserve+revive,
+					// or preserve without reviving. Three-way decision avoids conflating
+					// "known dirty" with "unknown baseline".
+					const ytext = this.vaultSync.getTextForPath(normalized);
+					const lastKnownContent =
+						options.baselineText !== undefined
+							? options.baselineText
+							: ytext?.toString() ?? null;
+
+					let decision: RemoteDeleteDecision = { kind: "apply-delete" };
+
+					let unresolvedReason: PreservedUnresolvedReason | null = null;
+
+					if (lastKnownContent !== null) {
+						try {
+							const diskContent = await this.app.vault.read(file);
+							if (diskContent !== lastKnownContent) {
+								// Known baseline exists, local file differs → known dirty.
+								// Preserve and revive: local dirty work wins over remote delete.
+								decision = { kind: "preserve-revive", diskContent };
+								this.trace?.("disk", "remote-delete-conflict-preserved", {
+									path,
+									normalizedPath: normalized,
+									reason: "local-file-modified-since-last-sync",
+									diskLength: diskContent.length,
+									crdtLength: lastKnownContent.length,
+								});
+								this.log(
+									`handleRemoteDelete: preserved locally modified "${path}" ` +
+									`(disk ${diskContent.length} chars !== CRDT ${lastKnownContent.length} chars)`,
+								);
+							}
+							// else: disk matches CRDT → clean → apply-delete stays
+						} catch {
+							// Read failed — file might be locked, busy, or inaccessible.
+							// We have a baseline but cannot verify local state. Treat as
+							// unresolved to avoid deleting potentially modified data.
+							decision = { kind: "preserve-unresolved" };
+							unresolvedReason = "remote-delete-read-failed";
+							this.trace?.("disk", "remote-delete-conflict-preserved", {
+								path,
+								normalizedPath: normalized,
+								reason: "read-failed-cannot-verify",
+							});
+							this.log(
+								`handleRemoteDelete: preserved "${path}" (read failed — cannot verify local state)`,
+							);
+						}
+					} else {
+						// No CRDT baseline available — cannot verify local file is
+						// unmodified. Preserve the file to avoid data loss, but DO NOT
+						// auto-revive the tombstone. This prevents phantom resurrection
+						// of legitimately deleted files when CRDT state is transiently
+						// unavailable (startup, hydration, race).
+						decision = { kind: "preserve-unresolved" };
+						unresolvedReason = "remote-delete-missing-baseline";
+						this.trace?.("disk", "remote-delete-conflict-preserved", {
+							path,
+							normalizedPath: normalized,
+							reason: "no-crdt-baseline-available",
+						});
+						this.log(
+							`handleRemoteDelete: preserved "${path}" (no CRDT baseline to compare — unresolved)`,
+						);
+					}
+
+					if (decision.kind === "apply-delete") {
+						this.unobserveText(normalized);
+						this.openPaths.delete(normalized);
+						this.pendingOpenWrites.delete(normalized);
+						this.writeQueue.delete(normalized);
+						this.forcedWritePaths.delete(normalized);
+						const pending = this.debounceTimers.get(normalized);
+						if (pending) {
+							clearTimeout(pending);
+							this.debounceTimers.delete(normalized);
+						}
+						const openPending = this.openWriteTimers.get(normalized);
+						if (openPending) {
+							clearTimeout(openPending);
+							this.openWriteTimers.delete(normalized);
+						}
+						// Unbind editor before suppressed delete so the vault `delete` event
+						// (which skips unbind due to suppression) doesn't leave a stale binding.
+						this.editorBindings.unbindByPath(normalized);
+						// If this path was previously preserved-unresolved but now
+						// we have a baseline proving it's clean, clear the marker.
+						if (this.preservedUnresolved.resolve(normalized)) {
+							this.onPreservedUnresolvedChanged?.();
+						}
+						this.suppressDelete(path);
+					const deleteMode = await this.deleteLocalReplica(file);
+					this.trace?.("disk", "remote-delete-applied", {
+						path,
+						deleteMode,
+						reason: "remote-delete",
+					});
+					this.log(`handleRemoteDelete: deleted "${path}" from disk`);
+					this._flightEventHandler?.({
+						priority: "critical",
+						kind: "delete.disk.applied",
+						severity: "info",
+						scope: "file",
+						source: "diskMirror",
+						layer: "disk",
+						path: normalized,
+						data: { deleteMode, reason: "tombstone-applied" },
+					});
+					} else if (decision.kind === "preserve-revive") {
+						// Clear any prior unresolved marker — we now have a baseline.
+						if (this.preservedUnresolved.resolve(normalized)) {
+							this.onPreservedUnresolvedChanged?.();
+						}
+						this._flightEventHandler?.({
+							priority: "critical",
+							kind: "delete.preserved",
+							severity: "warn",
+							scope: "file",
+							source: "diskMirror",
+							layer: "disk",
+							path: normalized,
+							data: { reason: "local-dirty-wins-over-remote-delete", preserveKind: "preserve-revive" },
+						});
+						// Known dirty: local file intentionally differs from baseline.
+						// Revive tombstone so the file re-enters sync. This is the
+						// explicit policy: local dirty work wins over remote delete.
+						try {
+							this.vaultSync.ensureFile(
+								normalized,
+								decision.diskContent,
+								this.getDeviceName(),
+								{
+									reviveTombstone: true,
+									reviveReason: "remote-delete-local-dirty-preserved",
+								},
+							);
+							this.trace?.("disk", "remote-delete-preserved-revived", {
+								path,
+								normalizedPath: normalized,
+								reason: "remote-delete-local-dirty-preserved",
+								contentLength: decision.diskContent.length,
+							});
+							this.log(
+								`handleRemoteDelete: revived tombstone for "${path}" after dirty preservation`,
+							);
+						} catch (reviveErr) {
+							// Best-effort: if revive fails, file is still on disk,
+							// tombstone remains, importUntrackedFiles can pick it up.
+							this.trace?.("disk", "remote-delete-preserved-revive-failed", {
+								path,
+								normalizedPath: normalized,
+								error: reviveErr instanceof Error ? reviveErr.message : String(reviveErr),
+							});
+						}
+					}
+				// kind === "preserve-unresolved": file stays on disk, tombstone
+				// remains in CRDT. The file is NOT auto-revived by later
+				// reconcile/import passes; explicit user action or a future
+				// remote event is required to resolve the limbo state.
+				if (decision.kind === "preserve-unresolved") {
+					this._flightEventHandler?.({
+						priority: "critical",
+						kind: "delete.preserved",
+						severity: "warn",
+						scope: "file",
+						source: "diskMirror",
+						layer: "disk",
+						path: normalized,
+						data: {
+							reason: unresolvedReason ?? "preserve-unresolved",
+							preserveKind: "preserve-unresolved",
+						},
+					});
+						this.unobserveText(normalized);
+						this.openPaths.delete(normalized);
+						this.pendingOpenWrites.delete(normalized);
+						this.writeQueue.delete(normalized);
+						this.forcedWritePaths.delete(normalized);
+						const pending = this.debounceTimers.get(normalized);
+						if (pending) {
+							clearTimeout(pending);
+							this.debounceTimers.delete(normalized);
+						}
+						const openPending = this.openWriteTimers.get(normalized);
+						if (openPending) {
+							clearTimeout(openPending);
+							this.openWriteTimers.delete(normalized);
+						}
+						this.editorBindings.unbindByPath(normalized);
+						this.preservedUnresolved.record({
+							path: normalized,
+							kind: "markdown",
+							reason: unresolvedReason ?? "unknown",
+						});
+						this.onPreservedUnresolvedChanged?.();
+					}
 			} catch (err) {
 				console.error(
 					`[yaos] handleRemoteDelete failed for "${path}":`,
@@ -588,7 +899,7 @@ export class DiskMirror {
 				const target = this.app.vault.getAbstractFileByPath(newNormalized);
 				if (target instanceof TFile) {
 					this.suppressDelete(oldNormalized);
-					await this.app.vault.delete(oldFile);
+					await this.deleteLocalReplica(oldFile);
 				} else {
 					const dir = newNormalized.substring(0, newNormalized.lastIndexOf("/"));
 					if (dir) {
@@ -597,7 +908,17 @@ export class DiskMirror {
 							await this.app.vault.createFolder(dir);
 						}
 					}
-					await this.app.fileManager.renameFile(oldFile, newNormalized);
+					// Mark this rename as remote-originated before the vault event fires,
+					// so main.ts can consume the marker and skip queueRename.
+					// consumeRemoteRename() in the vault handler removes the marker on use.
+					// On error (rename throws), the vault event won't fire, so clean up here.
+					this._pendingRemoteRenameNewPaths.add(newNormalized);
+					try {
+						await this.app.fileManager.renameFile(oldFile, newNormalized);
+					} catch (renameErr) {
+						this._pendingRemoteRenameNewPaths.delete(newNormalized);
+						throw renameErr;
+					}
 				}
 				this.log(`handleRemoteRename: "${oldNormalized}" -> "${newNormalized}"`);
 			} catch (err) {
@@ -613,12 +934,42 @@ export class DiskMirror {
 		}
 	}
 
+	private async deleteLocalReplica(file: TFile): Promise<"trash" | "delete"> {
+		const fileManager = (this.app as unknown as {
+			fileManager?: {
+				trashFile?: (file: TFile, system?: boolean) => Promise<void>;
+			};
+		}).fileManager;
+		if (fileManager?.trashFile) {
+			try {
+				await fileManager.trashFile(file, true);
+				return "trash";
+			} catch {
+				// Some adapters do not support system trash; fall back to delete.
+			}
+		}
+		await this.app.vault.delete(file);
+		return "delete";
+	}
+
 	// -------------------------------------------------------------------
 	// Suppression
 	// -------------------------------------------------------------------
 
 	isSuppressed(path: string): boolean {
 		return this.getActiveSuppression(path) !== null;
+	}
+
+	/**
+	 * Per-path timestamp of the most recent successful YAOS-issued
+	 * `flushWrite`. Returns null if YAOS has never written this path in
+	 * this session. Used by main.ts to label `disk.modify.observed` events
+	 * with writer attribution. See spec:
+	 * .kiro/specs/editor-bound-localonly-amplifier-guard/requirements.md (R8).
+	 */
+	getLastDiskWriteOkAt(path: string): number | null {
+		const v = this.lastDiskWriteOkAt.get(normalizePath(path));
+		return v === undefined ? null : v;
 	}
 
 	async shouldSuppressModify(file: TFile): Promise<boolean> {
@@ -636,6 +987,52 @@ export class DiskMirror {
 
 		this.suppressedPaths.delete(path);
 		return entry.kind === "delete";
+	}
+
+	/**
+	 * Returns true if this path was preserved during a remote-delete because
+	 * no baseline was available to verify local state.
+	 *
+	 * Callers (importUntrackedFiles, reconcile scans) MUST check this before
+	 * auto-reviving tombstones for local files.
+	 */
+	isPreservedUnresolved(path: string): boolean {
+		return this.preservedUnresolvedPaths.has(normalizePath(path));
+	}
+
+	/**
+	 * Clear the preserved-unresolved marker for a path. Called when evidence
+	 * arrives that the user intentionally wants this file to exist:
+	 * - User explicitly edits the file (vault modify event, not suppressed)
+	 * - User creates a new file at this path
+	 * - User deletes the file locally
+	 * - A future remote-delete arrives with a real baseline
+	 */
+	clearPreservedUnresolved(path: string): void {
+		const normalized = normalizePath(path);
+		if (this.preservedUnresolved.resolve(normalized)) {
+			this.onPreservedUnresolvedChanged?.();
+			this.trace?.("disk", "preserved-unresolved-cleared", {
+				path: normalized,
+				reason: "user-action-or-baseline-available",
+			});
+		}
+	}
+
+	recordPreservedUnresolved(
+		path: string,
+		reason: PreservedUnresolvedReason,
+	): void {
+		this.preservedUnresolved.record({
+			path: normalizePath(path),
+			kind: "markdown",
+			reason,
+		});
+		this.onPreservedUnresolvedChanged?.();
+	}
+
+	getPreservedUnresolvedEntries(): PreservedUnresolvedEntry[] {
+		return this.preservedUnresolved.getEntries();
 	}
 
 	async flushOpenWrites(reason: string): Promise<void> {
@@ -702,6 +1099,7 @@ export class DiskMirror {
 		debounceCount: number;
 		openDebounceCount: number;
 		suppressedCount: number;
+		preservedUnresolved: ReturnType<PreservedUnresolvedRegistry["getSummary"]>;
 	} {
 		return {
 			observedPaths: Array.from(this.textObservers.keys()),
@@ -711,12 +1109,68 @@ export class DiskMirror {
 			debounceCount: this.debounceTimers.size,
 			openDebounceCount: this.openWriteTimers.size,
 			suppressedCount: this.suppressedPaths.size,
+			preservedUnresolved: this.preservedUnresolved.getSummary(),
 		};
 	}
 
 	// -------------------------------------------------------------------
 	// Cleanup
 	// -------------------------------------------------------------------
+
+	/**
+	 * Flush all pending writes and await completion before teardown.
+	 *
+	 * Safe ordering for plugin unload:
+	 *   1. flushAllPendingWrites()  ← all writes complete, callbacks fire, hashes recorded
+	 *   2. caller saves disk index  ← persists content hashes to data.json
+	 *   3. destroy()                ← nothing pending, safe to clear state
+	 *
+	 * Covers:
+	 *   - writeQueue (debounced bulk writes)
+	 *   - pendingOpenWrites / openWriteTimers (deferred editor writes)
+	 *   - existing drain promise (if already draining)
+	 */
+	async flushAllPendingWrites(): Promise<void> {
+		// 1. Flush all pending open-file writes immediately (cancel their timers,
+		//    flush now with force=true so editor guards don't defer again).
+		const openPending = new Set<string>([
+			...this.pendingOpenWrites,
+			...this.openWriteTimers.keys(),
+		]);
+		for (const timer of this.openWriteTimers.values()) {
+			clearTimeout(timer);
+		}
+		this.openWriteTimers.clear();
+		this.pendingOpenWrites.clear();
+		if (openPending.size > 0) {
+			await Promise.all([...openPending].map((p) => this.flushWrite(p, true)));
+		}
+
+		// 2. Also flush anything sitting in the debounce timer queue (those
+		//    haven't made it into writeQueue yet).
+		const debouncePending = new Set<string>(this.debounceTimers.keys());
+		for (const timer of this.debounceTimers.values()) {
+			clearTimeout(timer);
+		}
+		this.debounceTimers.clear();
+		for (const path of debouncePending) {
+			this.writeQueue.add(path);
+		}
+
+		// 3. Drain the write queue. If a drain is already running, await it
+		//    then do one more pass to catch any items added during this flush.
+		if (this.drainPromise) {
+			await this.drainPromise;
+		}
+		if (this.writeQueue.size > 0) {
+			await this.kickDrain();
+		}
+
+		// 4. Await any outstanding per-path write locks.
+		if (this.pathWriteLocks.size > 0) {
+			await Promise.allSettled(this.pathWriteLocks.values());
+		}
+	}
 
 	destroy(): void {
 		const pendingFinalWrites = new Set<string>();
@@ -754,7 +1208,9 @@ export class DiskMirror {
 		this.openPaths.clear();
 		this.forcedWritePaths.clear();
 		this.suppressedPaths.clear();
+		this.preservedUnresolved.clear();
 		this.pathWriteLocks.clear();
+		this.lastDiskWriteOkAt.clear();
 		this.log("DiskMirror destroyed");
 	}
 
@@ -842,6 +1298,23 @@ export class DiskMirror {
 		if (entry.kind !== "write") {
 			this.suppressedPaths.delete(path);
 			this.log(`suppression: "${path}" ${event} did not match pending delete`);
+			this.trace?.("disk", "suppression-mismatch", {
+				path,
+				event,
+				expectedKind: entry.kind,
+				observedKind: "write",
+				reason: "kind-mismatch",
+			});
+			this._flightEventHandler?.({
+				priority: "critical",
+				kind: "disk.event.not_suppressed",
+				severity: "warn",
+				scope: "file",
+				source: "diskMirror",
+				layer: "disk",
+				path,
+				data: { event, reason: "kind-mismatch", expectedKind: entry.kind },
+			});
 			return false;
 		}
 
@@ -855,6 +1328,29 @@ export class DiskMirror {
 				`suppression: "${path}" ${event} size mismatch ` +
 				`(expected=${entry.expectedBytes}, observed=${file.stat.size})`,
 			);
+			this.trace?.("disk", "suppression-mismatch", {
+				path,
+				event,
+				expectedKind: entry.kind,
+				expectedBytes: entry.expectedBytes,
+				observedBytes: file.stat.size,
+				reason: "size-mismatch",
+			});
+			this._flightEventHandler?.({
+				priority: "critical",
+				kind: "disk.event.not_suppressed",
+				severity: "warn",
+				scope: "file",
+				source: "diskMirror",
+				layer: "disk",
+				path,
+				data: {
+					event,
+					reason: "size-mismatch",
+					expectedBytes: entry.expectedBytes,
+					observedBytes: file.stat.size,
+				},
+			});
 			return false;
 		}
 
@@ -869,14 +1365,51 @@ export class DiskMirror {
 			) {
 				this.suppressedPaths.delete(path);
 				this.log(`suppression: acknowledged "${path}" ${event}`);
+				this.trace?.("disk", "suppression-acknowledged", {
+					path,
+					event,
+					kind: entry.kind,
+					expectedBytes: entry.expectedBytes,
+					expectedHashPrefix: hashPrefix(entry.expectedHash),
+				});
 				return true;
 			}
-		} catch {
+		} catch (err) {
+			this.trace?.("disk", "suppression-mismatch", {
+				path,
+				event,
+				expectedKind: entry.kind,
+				reason: "read-failed",
+				error: formatUnknown(err),
+			});
 			// If the file cannot be read here, fall through and let normal sync handle it.
 		}
 
 		this.suppressedPaths.delete(path);
 		this.log(`suppression: "${path}" ${event} fingerprint mismatch`);
+		this.trace?.("disk", "suppression-mismatch", {
+			path,
+			event,
+			expectedKind: entry.kind,
+			expectedBytes: entry.expectedBytes,
+			expectedHashPrefix: hashPrefix(entry.expectedHash),
+			reason: "fingerprint-mismatch",
+		});
+		this._flightEventHandler?.({
+			priority: "critical",
+			kind: "disk.event.not_suppressed",
+			severity: "warn",
+			scope: "file",
+			source: "diskMirror",
+			layer: "disk",
+			path,
+			data: {
+				event,
+				reason: "fingerprint-mismatch",
+				expectedBytes: entry.expectedBytes,
+				expectedHashPrefix: hashPrefix(entry.expectedHash),
+			},
+		});
 		return false;
 	}
 
