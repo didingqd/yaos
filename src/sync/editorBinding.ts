@@ -792,7 +792,7 @@ export class EditorBindingManager {
 
 		let syncFacet: SyncFacetLike;
 		try {
-			syncFacet = cm.state.facet(ySyncFacet) as SyncFacetLike;
+			syncFacet = cm.state.facet(ySyncFacet);
 		} catch {
 			syncFacet = undefined;
 		}

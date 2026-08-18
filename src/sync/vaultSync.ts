@@ -902,7 +902,7 @@ export class VaultSync {
 						deleted: undefined,
 						mtime: now,
 						device,
-					} as unknown);
+					});
 					metaCreated++;
 					return;
 				}
@@ -921,7 +921,7 @@ export class VaultSync {
 							deletedAt: undefined,
 							mtime: currentMeta.mtime ?? now,
 							device: currentMeta.device ?? device,
-						} as unknown);
+						});
 					}
 					metaUpdated++;
 				}
@@ -935,7 +935,7 @@ export class VaultSync {
 					this.meta.set(fileId, {
 						path: this.normPath(decoded.path),
 						deletedAt: typeof decoded.mtime === "number" ? decoded.mtime : now,
-					} as unknown);
+					});
 					tombstonesConverted++;
 					return;
 				}
@@ -945,7 +945,7 @@ export class VaultSync {
 					this.meta.set(fileId, {
 						path: this.normPath(decoded.path),
 						deletedAt: typeof decoded.deletedAt === "number" ? decoded.deletedAt : now,
-					} as unknown);
+					});
 					metaUpdated++;
 				}
 			});
@@ -960,7 +960,7 @@ export class VaultSync {
 			for (const loserPath of loserPaths) {
 				if (existingActivePaths.has(loserPath)) continue;
 				const tombstoneId = this.generateFileId();
-				this.meta.set(tombstoneId, { path: loserPath, deletedAt: now } as unknown);
+				this.meta.set(tombstoneId, { path: loserPath, deletedAt: now });
 			}
 
 			this.sys.set("schemaVersion", 2);

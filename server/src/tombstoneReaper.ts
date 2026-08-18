@@ -157,7 +157,7 @@ function readDeletedAt(value: unknown): number | null {
 		return typeof deletedAt === "number" && Number.isFinite(deletedAt) ? deletedAt : null;
 	}
 	if (typeof value === "object" && value !== null && "deletedAt" in value) {
-		const deletedAt = (value as { deletedAt: unknown }).deletedAt;
+		const deletedAt = value.deletedAt;
 		return typeof deletedAt === "number" && Number.isFinite(deletedAt) ? deletedAt : null;
 	}
 	return null;
