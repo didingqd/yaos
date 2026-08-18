@@ -260,7 +260,7 @@ export async function handleSyncSocketRoute(
 	// A reconnect storm would otherwise produce:
 	//   YAOS_CONFIG auth + YAOS_SYNC schema check + YAOS_SYNC trace write
 	// on every connect, burning ~3 subrequests per socket open.
-	console.info(
+	console.debug(
 		`[yaos-sync:worker] ws connected: ` +
 		JSON.stringify({
 			vaultIdHint: vaultId.slice(0, 8),

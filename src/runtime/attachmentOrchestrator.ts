@@ -83,7 +83,7 @@ export class AttachmentOrchestrator {
 			this.deps.getBlobHashCache(),
 			this.deps.trace,
 			this.deps.getPreservedUnresolvedEntries(),
-			this.deps.onPreservedUnresolvedChanged,
+			() => this.deps.onPreservedUnresolvedChanged(),
 		);
 
 		this.blobSync = blobSync;

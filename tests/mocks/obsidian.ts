@@ -10,7 +10,6 @@
  *
  * Use via JITI_ALIAS: { "obsidian": "<path-to-this-file>" }
  */
-
 /** Identity normalization — adequate for test paths that don't need slash fixup. */
 export function normalizePath(path: string): string {
 	return path;

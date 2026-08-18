@@ -76,16 +76,16 @@ async function withTimeout<T>(
 	ms: number,
 	operation: string,
 ): Promise<T> {
-	let timeoutId: ReturnType<typeof setTimeout> | null = null;
+	let timeoutId: number | null = null;
 	const timeoutPromise = new Promise<never>((_, reject) => {
-		timeoutId = setTimeout(() => {
+		timeoutId = window.setTimeout(() => {
 			reject(new BlobHttpTimeoutError(operation, ms));
 		}, ms);
 	});
 	try {
 		return await Promise.race([promise, timeoutPromise]);
 	} finally {
-		if (timeoutId) clearTimeout(timeoutId);
+		if (timeoutId) window.clearTimeout(timeoutId);
 	}
 }
 
@@ -336,14 +336,14 @@ export class BlobSyncManager {
 	private downloadQueue = new Map<string, DownloadItem>();
 
 	/** Debounce timers for upload scheduling (keyed by path). */
-	private uploadDebounce = new Map<string, ReturnType<typeof setTimeout>>();
+	private uploadDebounce = new Map<string, number>();
 
 	/** Paths currently uploading. */
 	private inflightUploads = new Set<string>();
 	/** Paths currently downloading. */
 	private inflightDownloads = new Set<string>();
 	/** Retry timers for failed transfers. */
-	private retryTimers = new Set<ReturnType<typeof setTimeout>>();
+	private retryTimers = new Set<number>();
 	/** True while upload drain is running. */
 	private uploadDraining = false;
 	/** True while download drain is running. */
@@ -592,11 +592,11 @@ export class BlobSyncManager {
 
 		// Clear existing debounce
 		const existing = this.uploadDebounce.get(file.path);
-		if (existing) clearTimeout(existing);
+		if (existing) window.clearTimeout(existing);
 
 		this.uploadDebounce.set(
 			file.path,
-			setTimeout(() => {
+			window.setTimeout(() => {
 				this.uploadDebounce.delete(file.path);
 				this.enqueueUpload(file.path, 0, file.stat.size);
 				this.kickUploadDrain();
@@ -611,7 +611,7 @@ export class BlobSyncManager {
 		// Cancel any pending upload
 		const pendingUpload = this.uploadDebounce.get(path);
 		if (pendingUpload) {
-			clearTimeout(pendingUpload);
+			window.clearTimeout(pendingUpload);
 		}
 		this.uploadDebounce.delete(path);
 		this.uploadQueue.delete(path);
@@ -1687,25 +1687,16 @@ export class BlobSyncManager {
 		}
 	}
 
-	private async deleteLocalReplica(file: TFile): Promise<"trash" | "delete"> {
-		const fileManager = this.app.fileManager;
-		if (fileManager?.trashFile) {
-			try {
-				await fileManager.trashFile(file);
-				return "trash";
-			} catch {
-				// Some adapters do not support system trash; fall back to delete.
-			}
-		}
-		await this.app.vault.delete(file);
-		return "delete";
+	private async deleteLocalReplica(file: TFile): Promise<"trash"> {
+		await this.app.fileManager.trashFile(file);
+		return "trash";
 	}
 
 	private scheduleRetryKick(
 		delayMs: number,
 		channel: "upload" | "download",
 	): void {
-		const timer = setTimeout(() => {
+		const timer = window.setTimeout(() => {
 			this.retryTimers.delete(timer);
 			if (channel === "upload") this.kickUploadDrain();
 			else this.kickDownloadDrain();
@@ -1945,11 +1936,11 @@ export class BlobSyncManager {
 		this.observerCleanups = [];
 
 		for (const timer of this.uploadDebounce.values()) {
-			clearTimeout(timer);
+			window.clearTimeout(timer);
 		}
 		this.uploadDebounce.clear();
 		for (const timer of this.retryTimers.values()) {
-			clearTimeout(timer);
+			window.clearTimeout(timer);
 		}
 		this.retryTimers.clear();
 

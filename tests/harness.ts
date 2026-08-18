@@ -27,6 +27,15 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+// Product code uses window-scoped browser APIs for Obsidian popout
+// compatibility. Node suites install that host once through the shared harness.
+if (typeof window === "undefined") {
+	Object.defineProperty(globalThis, "window", {
+		value: globalThis,
+		configurable: true,
+	});
+}
+
 
 /** A queued throw-style test: `name` is the label, `body` may be async. */
 interface QueuedTest {

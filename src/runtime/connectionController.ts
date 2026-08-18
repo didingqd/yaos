@@ -52,8 +52,8 @@ export class ConnectionController {
 	private visibilityHandler: (() => void) | null = null;
 	private onlineHandler: (() => void) | null = null;
 	private offlineHandler: (() => void) | null = null;
-	private fastReconnectDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-	private fastReconnectConnectTimer: ReturnType<typeof setTimeout> | null = null;
+	private fastReconnectDebounceTimer: number | null = null;
+	private fastReconnectConnectTimer: number | null = null;
 	private lastFastReconnectAt = 0;
 
 	constructor(private readonly deps: ConnectionControllerDeps) {}
@@ -79,11 +79,11 @@ export class ConnectionController {
 			this.offlineHandler = null;
 		}
 		if (this.fastReconnectDebounceTimer) {
-			clearTimeout(this.fastReconnectDebounceTimer);
+			window.clearTimeout(this.fastReconnectDebounceTimer);
 			this.fastReconnectDebounceTimer = null;
 		}
 		if (this.fastReconnectConnectTimer) {
-			clearTimeout(this.fastReconnectConnectTimer);
+			window.clearTimeout(this.fastReconnectConnectTimer);
 			this.fastReconnectConnectTimer = null;
 		}
 	}
@@ -311,9 +311,9 @@ export class ConnectionController {
 		}
 
 		if (this.fastReconnectDebounceTimer) {
-			clearTimeout(this.fastReconnectDebounceTimer);
+			window.clearTimeout(this.fastReconnectDebounceTimer);
 		}
-		this.fastReconnectDebounceTimer = setTimeout(() => {
+		this.fastReconnectDebounceTimer = window.setTimeout(() => {
 			this.fastReconnectDebounceTimer = null;
 
 			const liveSync = this.deps.getVaultSync();
@@ -326,9 +326,9 @@ export class ConnectionController {
 			liveSync.provider.disconnect();
 
 			if (this.fastReconnectConnectTimer) {
-				clearTimeout(this.fastReconnectConnectTimer);
+				window.clearTimeout(this.fastReconnectConnectTimer);
 			}
-			this.fastReconnectConnectTimer = setTimeout(() => {
+			this.fastReconnectConnectTimer = window.setTimeout(() => {
 				this.fastReconnectConnectTimer = null;
 				const currentSync = this.deps.getVaultSync();
 				if (!currentSync || currentSync !== sync) return;

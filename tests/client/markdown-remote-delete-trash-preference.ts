@@ -14,10 +14,9 @@
  * (suppression maps, preserved-unresolved registry, open-path set, debounce
  * timers, observer cleanups, write queue).
  *
- *   Scenario A: trashFile available, trash preferred, no trash-mode flag passed
- *   Scenario B: trashFile missing, hard-delete fallback
- *   Scenario C: trashFile throws, trashFile attempted FIRST, hard-delete
- *               fallback, ordering trash-attempted-before-delete
+ *   Scenario A: trashFile available and user preference respected
+ *   Scenario B: trashFile missing, file preserved without hard deletion
+ *   Scenario C: trashFile throws, file preserved without hard deletion
  *   Scenario D: preserve-revive — no trash, no delete; ensureFile(..., reviveTombstone:true)
  *   Scenario E: preserve-unresolved — no trash, no delete, no ensureFile;
  *               path enters preservedUnresolved registry
@@ -285,74 +284,47 @@ s.section("Scenario A: markdown remote delete prefers trashFile");
 }
 
 // -------------------------------------------------------------------
-// Scenario B — trashFile missing, hard-delete fallback
+// Scenario B — trash unavailable, never hard-delete
 // -------------------------------------------------------------------
 
-s.section("Scenario B: markdown remote delete falls back when trash unavailable");
+s.section("Scenario B: markdown remote delete preserves when trash is unavailable");
 {
 	const path = "Notes/scenario-b.md";
 	const baseline = "scenario-b clean baseline";
-	// Form chosen: app.fileManager === undefined (the broader "missing" form;
-	// covers both "no fileManager" AND "no trashFile" since the optional chain
-	// in DiskMirror.deleteLocalReplica reads `fileManager?.trashFile`).
 	const fix = buildFixture({ path, diskContent: baseline, trashAdapter: "missing" });
 
 	await fix.mirror["handleRemoteDelete"](path, { baselineText: baseline });
 
-	assertEq(fix.trashCalls.length, 0, "trashFile not called when adapter missing");
-	assertEq(fix.deleteCalls.length, 1, "markdown remote delete falls back to vault.delete");
-	assertEq(fix.deleteCalls[0], path, "vault.delete called with correct path");
+	assertEq(fix.trashCalls.length, 0, "trashFile is unavailable");
+	assertEq(fix.deleteCalls.length, 0, "markdown remote delete never falls back to vault.delete");
 
 	const appliedEvents = fix.flightEvents.filter((e) => e.kind === "delete.disk.applied");
-	const preservedEvents = fix.flightEvents.filter((e) => e.kind === "delete.preserved");
-	assertEq(appliedEvents.length, 1, "exactly one delete.disk.applied event");
-	assertEq(preservedEvents.length, 0, "no delete.preserved events on missing-trash fallback");
-
-	assertEq(appliedEvents[0]?.data?.deleteMode, "delete", "markdown remote delete reports deleteMode 'delete' on flight event");
-	assertEq(appliedEvents[0]?.data?.reason, "tombstone-applied", "applied event reason is tombstone-applied");
-
-	s.check(!fix.fileExists(path), "file no longer exists in vault after fallback delete");
+	assertEq(appliedEvents.length, 0, "failed trash does not emit delete.disk.applied");
+	s.check(fix.fileExists(path), "file remains when the user-respecting trash path is unavailable");
 }
 
 // -------------------------------------------------------------------
-// Scenario C — trashFile throws, attempted then hard-delete fallback
+// Scenario C — trash failure, never hard-delete
 // -------------------------------------------------------------------
 
-s.section("Scenario C: markdown remote delete falls back when trashFile throws");
+s.section("Scenario C: markdown remote delete preserves when trashFile throws");
 {
 	const path = "Notes/scenario-c.md";
 	const baseline = "scenario-c clean baseline";
-	// Thrown error literal: "trash not supported" (see fileManagerByForm).
 	const fix = buildFixture({ path, diskContent: baseline, trashAdapter: "throws" });
 
 	await fix.mirror["handleRemoteDelete"](path, { baselineText: baseline });
 
-	assertEq(fix.trashCalls.length, 1, "markdown remote delete attempts trashFile before fallback");
+	assertEq(fix.trashCalls.length, 1, "markdown remote delete attempts trashFile exactly once");
 	assertEq(fix.trashCalls[0]?.path, path, "trashFile attempted for scenario C path");
-	assertEq(fix.trashCalls[0]?.system, undefined, "trashFile attempt passes no trash-mode flag even when it throws");
-	assertEq(fix.deleteCalls.length, 1, "vault.delete called as fallback after trashFile throw");
-	assertEq(fix.deleteCalls[0], path, "fallback vault.delete called with correct path");
-
-	// Temporal ordering: trash attempted before vault.delete.
-	const trashIdx = fix.callOrder.findIndex((c) => c.op === "trash");
-	const deleteIdx = fix.callOrder.findIndex((c) => c.op === "delete");
-	s.check(trashIdx >= 0 && deleteIdx > trashIdx, "trashFile attempted strictly before vault.delete");
+	assertEq(fix.trashCalls[0]?.system, undefined, "trashFile defers to the user's configured preference");
+	assertEq(fix.deleteCalls.length, 0, "trash failure never falls back to vault.delete");
 
 	const observedEvents = fix.flightEvents.filter((e) => e.kind === "delete.remote.observed");
 	const appliedEvents = fix.flightEvents.filter((e) => e.kind === "delete.disk.applied");
-	const preservedEvents = fix.flightEvents.filter((e) => e.kind === "delete.preserved");
-	assertEq(observedEvents.length, 1, "exactly one delete.remote.observed event");
-	assertEq(appliedEvents.length, 1, "exactly one delete.disk.applied event");
-	assertEq(preservedEvents.length, 0, "trash throw does not promote to delete.preserved");
-
-	assertEq(appliedEvents[0]?.data?.deleteMode, "delete", "markdown remote delete reports deleteMode 'delete' after trash throw");
-	assertEq(appliedEvents[0]?.data?.reason, "tombstone-applied", "applied event reason is tombstone-applied");
-
-	const observedIdx = fix.flightEvents.findIndex((e) => e.kind === "delete.remote.observed");
-	const appliedIdx = fix.flightEvents.findIndex((e) => e.kind === "delete.disk.applied");
-	s.check(observedIdx >= 0 && appliedIdx > observedIdx, "delete.remote.observed precedes delete.disk.applied even when trash throws");
-
-	s.check(!fix.fileExists(path), "file no longer exists in vault after fallback delete");
+	assertEq(observedEvents.length, 1, "remote tombstone observation remains visible");
+	assertEq(appliedEvents.length, 0, "trash failure does not emit delete.disk.applied");
+	s.check(fix.fileExists(path), "file remains when trashFile fails");
 }
 
 // -------------------------------------------------------------------

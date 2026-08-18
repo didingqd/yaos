@@ -96,6 +96,14 @@ export default tseslint.config(
 		"server/.wrangler",
 		"server/.partykit",
 		"tests",
+		// The Obsidian preset targets plugin runtime code. Build tooling,
+		// Worker maintenance scripts, benches, and server-only tests execute in
+		// Node or workerd and must not inherit browser/mobile plugin rules.
+		"build-server-release.mjs",
+		"scripts",
+		"server/scripts",
+		"server/bench-*.ts",
+		"server/tests",
 		// QA harness, analyzers, and run artifacts.
 		// `qa/` contains both .ts sources and emitted .js artifacts (e.g.
 		// qa/analyzers/analyzer.js sits next to qa/analyzers/analyzer.ts).

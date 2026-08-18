@@ -89,7 +89,7 @@ export class FlightRecorder {
 	private seq = 0;
 	private pendingEntries: PendingEntry[] = [];
 	private pendingChars = 0;
-	private flushTimer: ReturnType<typeof setTimeout> | null = null;
+	private flushTimer: number | null = null;
 	private writeChain: Promise<void> = Promise.resolve();
 	private dropStats: DropStats = {
 		count: 0,
@@ -344,7 +344,7 @@ export class FlightRecorder {
 
 	async shutdown(): Promise<void> {
 		if (this.flushTimer) {
-			clearTimeout(this.flushTimer);
+			window.clearTimeout(this.flushTimer);
 			this.flushTimer = null;
 		}
 		await this.flushNow();
@@ -363,7 +363,7 @@ export class FlightRecorder {
 
 	private scheduleFlush(): void {
 		if (this.flushTimer) return;
-		this.flushTimer = setTimeout(() => {
+		this.flushTimer = window.setTimeout(() => {
 			this.flushTimer = null;
 			void this.flushNow();
 		}, this.flushIntervalMs);

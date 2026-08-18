@@ -182,7 +182,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 	/** Domain-level trace sink. Routes to the debug runtime when active, noop otherwise. */
 	private traceSink: TraceSink = new NoopTraceSink();
 	private statusBarEl: HTMLElement | null = null;
-	private statusInterval: ReturnType<typeof setInterval> | null = null;
+	private statusInterval: number | null = null;
 	private readonly receiptStatusRefresh = new CoalescedStatusRefresh(() => {
 		if (!this.teardownLifecycle.isClosing) this.refreshStatusBar();
 	});
@@ -390,9 +390,8 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 		});
 		await this.loadSettings();
 		this.applyRuntimeSettings("load-settings");
-		const self = this;
 		this.frontmatterGuardCoordinator = new FrontmatterGuardCoordinator({
-			get frontmatterGuardEnabled() { return self.settings.frontmatterGuardEnabled; },
+			isFrontmatterGuardEnabled: () => this.settings.frontmatterGuardEnabled,
 			trace: (source, event, data) => this.trace(source, event, data),
 			persistPluginState: () => this.persistPluginState(),
 			getFrontmatterQuarantineEntries: () => this.frontmatterQuarantineEntries,
@@ -688,7 +687,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 				// Each VaultSync instance gets its own ticket cache.  The cache
 				// is discarded when VaultSync is torn down and recreated.
 				const ticketCache = createSocketTicketCache();
-				const self = this;
+
 				return async (force = false): Promise<{
 					value: string;
 					expiresAt: number;
@@ -696,7 +695,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 					ttlMs: number;
 				} | null> => {
 					const socketTicketAuth =
-						self.capabilityUpdateService?.capabilities?.socketTicketAuth;
+						this.capabilityUpdateService?.capabilities?.socketTicketAuth;
 
 					// Known old server that explicitly signals no ticket support.
 					if (socketTicketAuth === false) return null;
@@ -722,9 +721,9 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 
 					try {
 						return await ticketCache.get(
-							self.settings.host,
-							self.settings.token,
-							self.settings.vaultId,
+							this.settings.host,
+							this.settings.token,
+							this.settings.vaultId,
 						);
 					} catch (err) {
 						if (
@@ -733,11 +732,11 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 						) {
 							// Old server confirmed: stop probing on future reconnects.
 							ticketCache.markUnsupported();
-							self.log("socket ticket endpoint not found; using legacy ?token= for this connection");
+							this.log("socket ticket endpoint not found; using legacy ?token= for this connection");
 							return null;
 						}
 						// Real failure — propagate.
-						self.log(`socket ticket fetch failed: ${String(err)}`);
+						this.log(`socket ticket fetch failed: ${String(err)}`);
 						throw err;
 					}
 				};
@@ -890,7 +889,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 					});
 				}
 			});
-			this.statusInterval = setInterval(() => {
+			this.statusInterval = window.setInterval(() => {
 				this.refreshStatusBar();
 				if (this.reconciliationController.isReconciled && this.editorBindings) {
 					const touched = this.editorWorkspace?.auditBindings("status-tick") ?? 0;
@@ -910,7 +909,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 				}
 			}, 3000);
 			this.register(() => {
-				if (this.statusInterval) clearInterval(this.statusInterval);
+				if (this.statusInterval) window.clearInterval(this.statusInterval);
 				this.receiptStatusRefresh.cancel();
 			});
 
@@ -1480,7 +1479,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 			{
 				name: "status-interval",
 				run: () => {
-					if (this.statusInterval) clearInterval(this.statusInterval);
+					if (this.statusInterval) window.clearInterval(this.statusInterval);
 					this.statusInterval = null;
 					this.receiptStatusRefresh.cancel();
 				},
@@ -1584,7 +1583,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 					`${counts.blobCount} blob paths`,
 				);
 
-				await new Promise((r) => setTimeout(r, 500));
+				await new Promise((r) => window.setTimeout(r, 500));
 
 				const vaultId = this.settings.vaultId;
 				try {
@@ -2066,12 +2065,12 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 				(entry): entry is PreservedUnresolvedEntry =>
 					typeof entry === "object" &&
 					entry !== null &&
-					typeof (entry as PreservedUnresolvedEntry).path === "string" &&
-					((entry as PreservedUnresolvedEntry).kind === "markdown" ||
-						(entry as PreservedUnresolvedEntry).kind === "blob") &&
-					typeof (entry as PreservedUnresolvedEntry).reason === "string" &&
-					typeof (entry as PreservedUnresolvedEntry).firstSeenAt === "number" &&
-					typeof (entry as PreservedUnresolvedEntry).lastSeenAt === "number",
+					typeof (entry).path === "string" &&
+					((entry).kind === "markdown" ||
+						(entry).kind === "blob") &&
+					typeof (entry).reason === "string" &&
+					typeof (entry).firstSeenAt === "number" &&
+					typeof (entry).lastSeenAt === "number",
 			);
 		}
 		const cachedCapabilities = readPersistedServerCapabilitiesCache(data?._serverCapabilitiesCache);
@@ -2392,7 +2391,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 		// In this product build, no mutation API is available — log explicitly
 		// so developers know what happened instead of silently finding no API.
 		this.log("qaDebugMode enabled, but window.__YAOS_DEBUG__ is not mounted by this build. Install the QA harness plugin (qa/obsidian-harness/main.ts) to get the QA debug API.");
-		new Notice("YAOS: qaDebugMode active — QA debug API not available in this build. See qa/obsidian-harness/.", 8000);
+		new Notice("Yaos: Debug mode active — debug API unavailable in this build.", 8000);
 	}
 
 	private async exportFlightTraceForApi(privacy: "safe" | "full"): Promise<string | null> {

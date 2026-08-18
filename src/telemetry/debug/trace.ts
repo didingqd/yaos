@@ -65,8 +65,8 @@ export class PersistentTraceLogger implements TraceLoggerPort {
 	private readonly rootDir: string;
 
 	private pendingLines: string[] = [];
-	private flushTimer: ReturnType<typeof setTimeout> | null = null;
-	private stateTimer: ReturnType<typeof setTimeout> | null = null;
+	private flushTimer: number | null = null;
+	private stateTimer: number | null = null;
 	private latestState: unknown = null;
 	private seq = 0;
 	private pendingCharsApprox = 0;
@@ -123,8 +123,8 @@ export class PersistentTraceLogger implements TraceLoggerPort {
 	updateCurrentState(state: unknown): void {
 		if (!this.enabled) return;
 		this.latestState = state;
-		if (this.stateTimer) clearTimeout(this.stateTimer);
-		this.stateTimer = setTimeout(() => {
+		if (this.stateTimer) window.clearTimeout(this.stateTimer);
+		this.stateTimer = window.setTimeout(() => {
 			this.stateTimer = null;
 				void this.enqueueWrite(async () => {
 					if (!this.latestState) return;
@@ -170,7 +170,7 @@ export class PersistentTraceLogger implements TraceLoggerPort {
 	async shutdown(): Promise<void> {
 		if (!this.enabled) return;
 		if (this.stateTimer) {
-			clearTimeout(this.stateTimer);
+			window.clearTimeout(this.stateTimer);
 			this.stateTimer = null;
 		}
 		this.record("trace", "trace-session-end");
@@ -180,7 +180,7 @@ export class PersistentTraceLogger implements TraceLoggerPort {
 
 	private scheduleFlush(): void {
 		if (this.flushTimer) return;
-		this.flushTimer = setTimeout(() => {
+		this.flushTimer = window.setTimeout(() => {
 			this.flushTimer = null;
 			void this.flushNow();
 		}, FLUSH_DELAY_MS);

@@ -10,6 +10,7 @@
 	},
 	"dependencies": {
 		"fflate": "^0.8.2",
+		"lib0": "0.2.117",
 		"partyserver": "0.3.2",
 		"qrcode-generator": "2.0.4",
 		"y-partyserver": "2.1.2",

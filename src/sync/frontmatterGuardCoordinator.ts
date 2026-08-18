@@ -34,11 +34,11 @@ import {
 /**
  * Narrow interface the plugin must satisfy.
  *
- * The coordinator reads `frontmatterGuardEnabled` through a getter so it
- * always sees the live settings value without holding a stale copy.
+ * The coordinator reads the setting through a host callback so it always sees
+ * the live value without holding a stale copy.
  */
 export interface FrontmatterGuardHost {
-	readonly frontmatterGuardEnabled: boolean;
+	isFrontmatterGuardEnabled(): boolean;
 	trace(source: string, event: string, data?: Record<string, unknown>): void;
 	persistPluginState(): Promise<void>;
 	getFrontmatterQuarantineEntries(): FrontmatterQuarantineEntry[];
@@ -69,7 +69,7 @@ export class FrontmatterGuardCoordinator {
 		nextContent: string,
 		reason: string,
 	): boolean {
-		if (!this.host.frontmatterGuardEnabled) return false;
+		if (!this.host.isFrontmatterGuardEnabled()) return false;
 
 		const validation = validateFrontmatterTransition(previousContent, nextContent);
 		this.handleFrontmatterValidation(

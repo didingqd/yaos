@@ -112,8 +112,8 @@ export class DiskMirror {
 	private preservedUnresolved: PreservedUnresolvedRegistry;
 	readonly preservedUnresolvedPaths: ReadonlySet<string>;
 	/** Debounce timers per path. */
-	private debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
-	private openWriteTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	private debounceTimers = new Map<string, number>();
+	private openWriteTimers = new Map<string, number>();
 	private pendingOpenWrites = new Set<string>();
 	/** True while the drain loop is running. */
 	private draining = false;
@@ -212,7 +212,7 @@ export class DiskMirror {
 				switch (change.kind) {
 					case "deleted": {
 						const path = normalizePath(change.path);
-						const baselineText = this.vaultSync.idToText.get(change.fileId)?.toString() ?? null;
+						const baselineText = yTextToString(this.vaultSync.idToText.get(change.fileId));
 						void this.handleRemoteDelete(path, { baselineText });
 						break;
 					}
@@ -318,7 +318,7 @@ export class DiskMirror {
 		}
 		const closedTimer = this.debounceTimers.get(path);
 		if (closedTimer) {
-			clearTimeout(closedTimer);
+			window.clearTimeout(closedTimer);
 			this.debounceTimers.delete(path);
 			this.writeQueue.delete(path);
 			this.scheduleOpenWrite(path);
@@ -333,13 +333,13 @@ export class DiskMirror {
 		// Flush any pending debounce for this path
 		const timer = this.debounceTimers.get(path);
 		if (timer) {
-			clearTimeout(timer);
+			window.clearTimeout(timer);
 			this.debounceTimers.delete(path);
 			this.queueImmediateWrite(path, "file-closed");
 		}
 		const openTimer = this.openWriteTimers.get(path);
 		if (openTimer) {
-			clearTimeout(openTimer);
+			window.clearTimeout(openTimer);
 			this.openWriteTimers.delete(path);
 			this.pendingOpenWrites.delete(path);
 			this.queueImmediateWrite(path, "file-closed");
@@ -398,14 +398,14 @@ export class DiskMirror {
 	private scheduleClosedWrite(path: string): void {
 		// Clear existing debounce for this path
 		const existing = this.debounceTimers.get(path);
-		if (existing) clearTimeout(existing);
+		if (existing) window.clearTimeout(existing);
 
 		// Use longer debounce when queue is deep (burst scenario)
 		const delay = this.writeQueue.size >= BURST_THRESHOLD ? DEBOUNCE_BURST_MS : DEBOUNCE_MS;
 
 		this.debounceTimers.set(
 			path,
-			setTimeout(() => {
+			window.setTimeout(() => {
 				this.debounceTimers.delete(path);
 				this.writeQueue.add(path);
 					void this.kickDrain();
@@ -417,11 +417,11 @@ export class DiskMirror {
 		this.pendingOpenWrites.add(path);
 
 		const existing = this.openWriteTimers.get(path);
-		if (existing) clearTimeout(existing);
+		if (existing) window.clearTimeout(existing);
 
 		this.openWriteTimers.set(
 			path,
-				setTimeout(() => {
+				window.setTimeout(() => {
 					this.openWriteTimers.delete(path);
 					if (!this.pendingOpenWrites.has(path)) return;
 
@@ -470,7 +470,7 @@ export class DiskMirror {
 				// If the queue is very deep, log a warning and pause briefly
 				if (this.writeQueue.size > BURST_THRESHOLD) {
 					this.log(`drain: ${this.writeQueue.size} writes queued (burst), cooling down 200ms`);
-					await new Promise((r) => setTimeout(r, 200));
+					await new Promise((r) => window.setTimeout(r, 200));
 				}
 
 				// Take up to MAX_CONCURRENT_WRITES from the queue
@@ -665,7 +665,7 @@ export class DiskMirror {
 					const lastKnownContent =
 						options.baselineText !== undefined
 							? options.baselineText
-							: ytext?.toString() ?? null;
+							: yTextToString(ytext);
 
 					let decision: RemoteDeleteDecision = { kind: "apply-delete" };
 
@@ -732,12 +732,12 @@ export class DiskMirror {
 						this.forcedWritePaths.delete(normalized);
 						const pending = this.debounceTimers.get(normalized);
 						if (pending) {
-							clearTimeout(pending);
+							window.clearTimeout(pending);
 							this.debounceTimers.delete(normalized);
 						}
 						const openPending = this.openWriteTimers.get(normalized);
 						if (openPending) {
-							clearTimeout(openPending);
+							window.clearTimeout(openPending);
 							this.openWriteTimers.delete(normalized);
 						}
 						// Unbind editor before suppressed delete so the vault `delete` event
@@ -838,12 +838,12 @@ export class DiskMirror {
 						this.forcedWritePaths.delete(normalized);
 						const pending = this.debounceTimers.get(normalized);
 						if (pending) {
-							clearTimeout(pending);
+							window.clearTimeout(pending);
 							this.debounceTimers.delete(normalized);
 						}
 						const openPending = this.openWriteTimers.get(normalized);
 						if (openPending) {
-							clearTimeout(openPending);
+							window.clearTimeout(openPending);
 							this.openWriteTimers.delete(normalized);
 						}
 						this.editorBindings.unbindByPath(normalized);
@@ -876,12 +876,12 @@ export class DiskMirror {
 
 		const oldDebounce = this.debounceTimers.get(oldNormalized);
 		if (oldDebounce) {
-			clearTimeout(oldDebounce);
+			window.clearTimeout(oldDebounce);
 			this.debounceTimers.delete(oldNormalized);
 		}
 		const oldOpenDebounce = this.openWriteTimers.get(oldNormalized);
 		if (oldOpenDebounce) {
-			clearTimeout(oldOpenDebounce);
+			window.clearTimeout(oldOpenDebounce);
 			this.openWriteTimers.delete(oldNormalized);
 		}
 
@@ -932,18 +932,9 @@ export class DiskMirror {
 		}
 	}
 
-	private async deleteLocalReplica(file: TFile): Promise<"trash" | "delete"> {
-		const fileManager = this.app.fileManager;
-		if (fileManager?.trashFile) {
-			try {
-				await fileManager.trashFile(file);
-				return "trash";
-			} catch {
-				// Some adapters do not support system trash; fall back to delete.
-			}
-		}
-		await this.app.vault.delete(file);
-		return "delete";
+	private async deleteLocalReplica(file: TFile): Promise<"trash"> {
+		await this.app.fileManager.trashFile(file);
+		return "trash";
 	}
 
 	// -------------------------------------------------------------------
@@ -1041,7 +1032,7 @@ export class DiskMirror {
 		for (const path of targets) {
 			const timer = this.openWriteTimers.get(path);
 			if (timer) {
-				clearTimeout(timer);
+				window.clearTimeout(timer);
 				this.openWriteTimers.delete(path);
 			}
 			this.pendingOpenWrites.delete(path);
@@ -1056,7 +1047,7 @@ export class DiskMirror {
 		const timer = this.openWriteTimers.get(path);
 		const hadTimer = !!timer;
 		if (timer) {
-			clearTimeout(timer);
+			window.clearTimeout(timer);
 			this.openWriteTimers.delete(path);
 		}
 		const wasPending = this.pendingOpenWrites.delete(path);
@@ -1131,7 +1122,7 @@ export class DiskMirror {
 			...this.openWriteTimers.keys(),
 		]);
 		for (const timer of this.openWriteTimers.values()) {
-			clearTimeout(timer);
+			window.clearTimeout(timer);
 		}
 		this.openWriteTimers.clear();
 		this.pendingOpenWrites.clear();
@@ -1143,7 +1134,7 @@ export class DiskMirror {
 		//    haven't made it into writeQueue yet).
 		const debouncePending = new Set<string>(this.debounceTimers.keys());
 		for (const timer of this.debounceTimers.values()) {
-			clearTimeout(timer);
+			window.clearTimeout(timer);
 		}
 		this.debounceTimers.clear();
 		for (const path of debouncePending) {
@@ -1188,11 +1179,11 @@ export class DiskMirror {
 		this.textObservers.clear();
 
 		for (const timer of this.debounceTimers.values()) {
-			clearTimeout(timer);
+			window.clearTimeout(timer);
 		}
 		this.debounceTimers.clear();
 		for (const timer of this.openWriteTimers.values()) {
-			clearTimeout(timer);
+			window.clearTimeout(timer);
 		}
 		this.openWriteTimers.clear();
 

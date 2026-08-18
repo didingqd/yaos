@@ -241,8 +241,8 @@ s.section("Test 6: index.ts has route-bucket logging with not_found sampling");
 		"logWorkerRequest function is defined in index.ts",
 	);
 	s.check(
-		/console\.info/.test(source),
-		"logWorkerRequest uses console.info for structured output",
+		/console\.debug/.test(source),
+		"logWorkerRequest uses review-compliant structured debug output",
 	);
 	// not_found must be sampled (not logged unconditionally)
 	s.check(

@@ -129,26 +129,27 @@
  *                         looking like inserted document text)
  */
 
-/* Hide by default */
-.cm-ySelection,
-.cm-yLineSelection,
-.cm-ySelectionCaret {
-	display: none !important;
+/* Hide by default. The editor-scoped selectors outrank y-codemirror's
+ * single-class display rules without overriding the cascade globally. */
+body:not(.vault-crdt-show-cursors) .cm-editor .cm-ySelection,
+body:not(.vault-crdt-show-cursors) .cm-editor .cm-yLineSelection,
+body:not(.vault-crdt-show-cursors) .cm-editor .cm-ySelectionCaret {
+	display: none;
 }
 
-/* When enabled, show cursors with styling */
-.vault-crdt-show-cursors .cm-ySelection {
-	display: inline !important;
+/* When enabled, show cursors with styling. */
+body.vault-crdt-show-cursors .cm-editor .cm-ySelection {
+	display: inline;
 	opacity: 0.4;
 }
 
-.vault-crdt-show-cursors .cm-yLineSelection {
-	display: block !important;
+body.vault-crdt-show-cursors .cm-editor .cm-yLineSelection {
+	display: block;
 	opacity: 0.4;
 }
 
-.vault-crdt-show-cursors .cm-ySelectionCaret {
-	display: inline !important;
+body.vault-crdt-show-cursors .cm-editor .cm-ySelectionCaret {
+	display: inline;
 	position: relative;
 	border-left: 2px solid;
 	border-color: inherit;
@@ -166,6 +167,6 @@
 	background-color: inherit;
 }
 
-.vault-crdt-show-cursors .cm-ySelectionInfo {
-	display: none !important;
+body .cm-editor .cm-ySelectionInfo {
+	display: none;
 }

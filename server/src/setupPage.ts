@@ -23,6 +23,7 @@ function escapeHtml(value: string): string {
 		.replace(/"/g, "&quot;");
 }
 
+
 export function renderSetupPage(options: SetupPageOptions): string {
 	const safeHost = escapeHtml(options.host);
 

@@ -22,9 +22,9 @@ interface TraceRuntimeDeps {
 
 export class TraceRuntimeController {
 	private logger: TraceLoggerPort | null = null;
-	private stateInterval: ReturnType<typeof setInterval> | null = null;
-	private stateTimer: ReturnType<typeof setTimeout> | null = null;
-	private serverInterval: ReturnType<typeof setInterval> | null = null;
+	private stateInterval: number | null = null;
+	private stateTimer: number | null = null;
+	private serverInterval: number | null = null;
 	private serverInFlight = false;
 	private recentServerTrace: unknown[] = [];
 	private lastMetadataRaceRejectionAt = 0;
@@ -54,10 +54,10 @@ export class TraceRuntimeController {
 			externalEditPolicy: settings.externalEditPolicy,
 		});
 
-		this.stateInterval = setInterval(() => {
+		this.stateInterval = window.setInterval(() => {
 			this.scheduleSnapshot("interval");
 		}, 5000);
-		this.serverInterval = setInterval(() => {
+		this.serverInterval = window.setInterval(() => {
 			void this.fetchServerTrace();
 		}, 15000);
 
@@ -133,8 +133,8 @@ export class TraceRuntimeController {
 
 	scheduleSnapshot(reason: string): void {
 		if (!this.logger?.isEnabled) return;
-		if (this.stateTimer) clearTimeout(this.stateTimer);
-		this.stateTimer = setTimeout(() => {
+		if (this.stateTimer) window.clearTimeout(this.stateTimer);
+		this.stateTimer = window.setTimeout(() => {
 			this.stateTimer = null;
 			void this.writeSnapshot(reason);
 		}, 250);
@@ -146,15 +146,15 @@ export class TraceRuntimeController {
 
 	async shutdown(): Promise<void> {
 		if (this.stateTimer) {
-			clearTimeout(this.stateTimer);
+			window.clearTimeout(this.stateTimer);
 			this.stateTimer = null;
 		}
 		if (this.stateInterval) {
-			clearInterval(this.stateInterval);
+			window.clearInterval(this.stateInterval);
 			this.stateInterval = null;
 		}
 		if (this.serverInterval) {
-			clearInterval(this.serverInterval);
+			window.clearInterval(this.serverInterval);
 			this.serverInterval = null;
 		}
 		await this.logger?.shutdown();

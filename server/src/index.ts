@@ -253,7 +253,7 @@ function logWorkerRequest(args: {
 	if (args.route.kind === "not-found" && Math.random() >= 0.01) {
 		return;
 	}
-	console.info(
+	console.debug(
 		"[yaos-worker] request " + JSON.stringify({
 			route: routeBucket(args.route),
 			method: args.method,

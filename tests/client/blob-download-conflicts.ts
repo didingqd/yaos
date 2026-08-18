@@ -355,15 +355,14 @@ s.section("Test 5: blob remote delete prefers trashFile");
 	);
 }
 
-// ── Test 6: blob remote delete falls back to hard delete ────────────────────
+// ── Test 6: blob remote delete preserves file when trash is unavailable ─────
 
-s.section("Test 6: blob remote delete falls back when trash unavailable");
+s.section("Test 6: blob remote delete never hard-deletes when trash is unavailable");
 {
 	const { vault, fileManager, manager, files, put, traces } = makeHarness();
 	const existing = put("attachment2.png", bytes("local data 2"));
 	const deletedPaths: string[] = [];
 
-	// Seed hash cache so knownHash matches — file is clean, delete should proceed
 	const knownHash = "deadbeef5678";
 	manager["hashCache"]["attachment2.png"] = {
 		mtime: existing.file.stat.mtime,
@@ -371,7 +370,6 @@ s.section("Test 6: blob remote delete falls back when trash unavailable");
 		hash: knownHash,
 	};
 
-	// No fileManager.trashFile — simulate unavailable trash
 	fileManager.trashFile = undefined;
 	vault.delete = async (file) => {
 		deletedPaths.push(file.path);
@@ -380,26 +378,22 @@ s.section("Test 6: blob remote delete falls back when trash unavailable");
 
 	await manager["handleRemoteDelete"]("attachment2.png", knownHash);
 
-	s.check(deletedPaths.includes("attachment2.png"), "blob remote delete falls back to hard delete");
-	s.check(!files.has("attachment2.png"), "file is removed from vault");
+	s.check(deletedPaths.length === 0, "blob remote delete never falls back to hard delete");
+	s.check(files.has("attachment2.png"), "file remains when the user-respecting trash path is unavailable");
 	s.check(
-		traces.some((event) =>
-			event.msg === "remote-delete-applied" &&
-			event.details?.deleteMode === "delete"
-		),
-		"blob remote delete traces deleteMode as 'delete'",
+		!traces.some((event) => event.msg === "remote-delete-applied"),
+		"failed trash does not emit remote-delete-applied",
 	);
 }
 
-// ── Test 7: blob remote delete with trash failure falls back ────────────────
+// ── Test 7: blob remote delete preserves file when trash fails ──────────────
 
-s.section("Test 7: blob remote delete falls back when trashFile throws");
+s.section("Test 7: blob remote delete never hard-deletes when trashFile throws");
 {
 	const { vault, fileManager, manager, files, put, traces } = makeHarness();
 	const existing = put("attachment3.png", bytes("local data 3"));
 	const deletedPaths: string[] = [];
 
-	// Seed hash cache so knownHash matches — file is clean, delete should proceed
 	const knownHash = "deadbeef9abc";
 	manager["hashCache"]["attachment3.png"] = {
 		mtime: existing.file.stat.mtime,
@@ -417,13 +411,11 @@ s.section("Test 7: blob remote delete falls back when trashFile throws");
 
 	await manager["handleRemoteDelete"]("attachment3.png", knownHash);
 
-	s.check(deletedPaths.includes("attachment3.png"), "falls back to hard delete when trash throws");
+	s.check(deletedPaths.length === 0, "trash failure never falls back to hard delete");
+	s.check(files.has("attachment3.png"), "file remains when trashFile fails");
 	s.check(
-		traces.some((event) =>
-			event.msg === "remote-delete-applied" &&
-			event.details?.deleteMode === "delete"
-		),
-		"traces fallback deleteMode as 'delete'",
+		!traces.some((event) => event.msg === "remote-delete-applied"),
+		"trash failure does not emit remote-delete-applied",
 	);
 }
 
@@ -431,7 +423,7 @@ s.section("Test 7: blob remote delete falls back when trashFile throws");
 
 s.section("Test 8: blob remote delete suppresses path before deletion");
 {
-	const { vault, manager, files, put, traces } = makeHarness();
+	const { fileManager, manager, files, put, traces } = makeHarness();
 	const existing = put("suppressed.png", bytes("suppress me"));
 
 	// Seed hash cache so knownHash matches — file is clean, delete should proceed
@@ -442,11 +434,11 @@ s.section("Test 8: blob remote delete suppresses path before deletion");
 		hash: knownHash,
 	};
 
-	vault.delete = async (file) => {
-		// Check suppression is active before deletion completes
+	fileManager.trashFile = async (file) => {
+		// Check suppression is active before deletion completes.
 		s.check(
 			manager.isSuppressed("suppressed.png"),
-			"path is suppressed before delete executes",
+			"path is suppressed before trash executes",
 		);
 		files.delete(file.path);
 	};
@@ -486,7 +478,7 @@ s.section("Test 9: blob remote delete preserves locally modified file");
 
 s.section("Test 10: blob remote delete proceeds when hash matches known");
 {
-	const { vault, manager, files, put, traces } = makeHarness();
+	const { fileManager, manager, files, put, traces } = makeHarness();
 	const existing = put("unchanged.png", bytes("same content"));
 
 	// Seed the hash cache so getCachedHash returns the known hash
@@ -498,16 +490,16 @@ s.section("Test 10: blob remote delete proceeds when hash matches known");
 		hash: knownHash,
 	};
 
-	const deletedPaths: string[] = [];
-	vault.delete = async (file) => {
-		deletedPaths.push(file.path);
+	const trashedPaths: string[] = [];
+	fileManager.trashFile = async (file) => {
+		trashedPaths.push(file.path);
 		files.delete(file.path);
 	};
 
 	await manager["handleRemoteDelete"]("unchanged.png", knownHash);
 
 	s.check(!files.has("unchanged.png"), "unmodified file is deleted");
-	s.check(deletedPaths.includes("unchanged.png"), "delete was called for unmodified file");
+	s.check(trashedPaths.includes("unchanged.png"), "trashFile was called for unmodified file");
 	s.check(
 		traces.some((event) => event.msg === "remote-delete-applied"),
 		"blob remote delete traces remote-delete-applied for unmodified file",

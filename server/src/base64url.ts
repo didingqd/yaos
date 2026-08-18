@@ -11,7 +11,7 @@ const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789
 /** Lookup table: ASCII code → 6-bit value, or 0xff for invalid chars. */
 const DECODE = new Uint8Array(256).fill(0xff);
 for (let i = 0; i < ALPHABET.length; i++) {
-	DECODE[ALPHABET.charCodeAt(i)!] = i;
+	DECODE[ALPHABET.charCodeAt(i)] = i;
 }
 
 export function bytesToBase64Url(bytes: Uint8Array): string {
@@ -44,7 +44,7 @@ export function base64UrlToBytes(str: string): Uint8Array {
 
 	// Validate alphabet before allocating.
 	for (let i = 0; i < len; i++) {
-		if (DECODE[str.charCodeAt(i)!] === 0xff) {
+		if (DECODE[str.charCodeAt(i)] === 0xff) {
 			throw new Error(`invalid base64url char at index ${i}`);
 		}
 	}
@@ -59,22 +59,22 @@ export function base64UrlToBytes(str: string): Uint8Array {
 	let outIdx = 0;
 	let i = 0;
 	for (; i + 3 < len; i += 4) {
-		const a = DECODE[str.charCodeAt(i)!]!;
-		const b = DECODE[str.charCodeAt(i + 1)!]!;
-		const c = DECODE[str.charCodeAt(i + 2)!]!;
-		const d = DECODE[str.charCodeAt(i + 3)!]!;
+		const a = DECODE[str.charCodeAt(i)]!;
+		const b = DECODE[str.charCodeAt(i + 1)]!;
+		const c = DECODE[str.charCodeAt(i + 2)]!;
+		const d = DECODE[str.charCodeAt(i + 3)]!;
 		out[outIdx++] = (a << 2) | (b >> 4);
 		out[outIdx++] = ((b & 0xf) << 4) | (c >> 2);
 		out[outIdx++] = ((c & 0x3) << 6) | d;
 	}
 	if (rem === 2) {
-		const a = DECODE[str.charCodeAt(i)!]!;
-		const b = DECODE[str.charCodeAt(i + 1)!]!;
+		const a = DECODE[str.charCodeAt(i)]!;
+		const b = DECODE[str.charCodeAt(i + 1)]!;
 		out[outIdx++] = (a << 2) | (b >> 4);
 	} else if (rem === 3) {
-		const a = DECODE[str.charCodeAt(i)!]!;
-		const b = DECODE[str.charCodeAt(i + 1)!]!;
-		const c = DECODE[str.charCodeAt(i + 2)!]!;
+		const a = DECODE[str.charCodeAt(i)]!;
+		const b = DECODE[str.charCodeAt(i + 1)]!;
+		const c = DECODE[str.charCodeAt(i + 2)]!;
 		out[outIdx++] = (a << 2) | (b >> 4);
 		out[outIdx++] = ((b & 0xf) << 4) | (c >> 2);
 	}

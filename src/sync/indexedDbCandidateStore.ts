@@ -218,11 +218,11 @@ function defaultRandomUuid(): string {
 }
 
 function defaultIndexedDbFactory(): IDBFactory {
-	if (!globalThis.indexedDB) throw new Error("IndexedDB is not available");
-	return globalThis.indexedDB;
+	if (!window.indexedDB) throw new Error("IndexedDB is not available");
+	return window.indexedDB;
 }
 
 function defaultCrypto(): Crypto {
-	if (!globalThis.crypto) throw new Error("crypto is not available");
-	return globalThis.crypto;
+	if (!window.crypto) throw new Error("crypto is not available");
+	return window.crypto;
 }

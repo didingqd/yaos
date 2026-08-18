@@ -117,7 +117,7 @@ export class FlightTraceSink implements TraceSink {
 			kind: flightKind as FlightKind,
 			severity: event.severity,
 			scope: event.scope,
-			source: kindToSource(event.kind) as FlightSource,
+			source: kindToSource(event.kind),
 			layer: kindToLayer(event.kind),
 			opId: event.opId ?? event.data?.["opId"] as string | undefined,
 			path: event.path,

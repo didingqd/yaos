@@ -51,16 +51,16 @@ export class SnapshotListModal extends Modal {
 				minute: "2-digit",
 			});
 
-			const title = item.createEl("div");
+			const title = item.createDiv();
 			title.createEl("strong", { text: dateStr });
 			if (snap.triggeredBy) {
-				title.createEl("span", {
+				title.createSpan({
 					text: ` (${snap.triggeredBy})`,
 					cls: "setting-item-description",
 				});
 			}
 
-			item.createEl("div", {
+			item.createDiv({
 				text: `${snap.markdownFileCount} notes, ${snap.blobFileCount} attachments ` +
 					`(${Math.round(snap.crdtSizeBytes / 1024)} KB)`,
 				cls: "setting-item-description",

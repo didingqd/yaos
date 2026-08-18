@@ -131,12 +131,12 @@ export class EditorBindingManager {
 	private cmIds = new WeakMap<EditorView, string>();
 	private cmToLeafId = new WeakMap<EditorView, string>();
 	private cmCounter = 0;
-	private pendingHealthChecks = new Map<string, ReturnType<typeof setTimeout>>();
+	private pendingHealthChecks = new Map<string, number>();
 	private healthWorkInFlight = new Set<string>();
 	private lastDeviceName = "unknown";
 	private cmDegradedWarned = false;
 	private cmResolveAttempts = new Map<string, number>();
-	private pendingCmResolveRetries = new Map<string, ReturnType<typeof setTimeout>>();
+	private pendingCmResolveRetries = new Map<string, number>();
 	/**
 	 * Why the last getCmView() call returned null. Attached to the degraded
 	 * trace so field reports separate "no editor ever registered" (our CM6
@@ -1214,7 +1214,7 @@ export class EditorBindingManager {
 		}
 
 		const retryDelay = CM_RESOLVE_RETRY_DELAY_MS * attempts;
-		const timer = setTimeout(() => {
+		const timer = window.setTimeout(() => {
 			this.pendingCmResolveRetries.delete(leafId);
 			this.bind(view, deviceName);
 		}, retryDelay);
@@ -1224,7 +1224,7 @@ export class EditorBindingManager {
 	private clearCmResolveRetry(leafId: string): void {
 		const timer = this.pendingCmResolveRetries.get(leafId);
 		if (timer) {
-			clearTimeout(timer);
+			window.clearTimeout(timer);
 			this.pendingCmResolveRetries.delete(leafId);
 		}
 		this.cmResolveAttempts.delete(leafId);
@@ -1236,7 +1236,7 @@ export class EditorBindingManager {
 		source: string,
 	): void {
 		this.clearScheduledHealthCheck(leafId);
-		const timer = setTimeout(() => {
+		const timer = window.setTimeout(() => {
 			this.pendingHealthChecks.delete(leafId);
 			const binding = this.bindings.get(leafId);
 			if (!binding) return;
@@ -1256,7 +1256,7 @@ export class EditorBindingManager {
 	private clearScheduledHealthCheck(leafId: string): void {
 		const timer = this.pendingHealthChecks.get(leafId);
 		if (timer) {
-			clearTimeout(timer);
+			window.clearTimeout(timer);
 			this.pendingHealthChecks.delete(leafId);
 		}
 	}

@@ -262,13 +262,12 @@ s.section("Test 5: diskMirror remote delete emits trace with deleteMode");
 	s.check(deletedPaths.length === 0, "diskMirror does not hard-delete when trash available");
 }
 
-s.section("Test 6: diskMirror remote delete falls back to hard delete");
+s.section("Test 6: diskMirror never hard-deletes when trash is unavailable");
 {
 	const events: CapturedTrace[] = [];
 	const deletedPaths: string[] = [];
 
 	const file = makeFile("Notes/fallback-deleted.md", { ctime: 1, mtime: 1, size: 10 });
-
 	const fileContent = "content";
 	const crdtText = makeCrdtText(fileContent);
 	const app = makeApp({
@@ -281,10 +280,8 @@ s.section("Test 6: diskMirror remote delete falls back to hard delete");
 		workspace: {
 			getActiveViewOfType: () => null,
 		},
-		// No fileManager — trash unavailable
 	});
 	const vaultSync = makeVaultSync({
-		// CRDT matches disk content — file is clean, delete should proceed
 		getTextForPath: () => crdtText,
 	});
 	const editorBindings = makeEditorBindings({
@@ -297,9 +294,8 @@ s.section("Test 6: diskMirror remote delete falls back to hard delete");
 	await mirror["handleRemoteDelete"]("Notes/fallback-deleted.md");
 
 	const deleteApplied = findEvent(events, "disk", "remote-delete-applied");
-	s.check(!!deleteApplied, "diskMirror fallback delete emits remote-delete-applied trace");
-	s.check(deleteApplied?.details?.deleteMode === "delete", "diskMirror fallback reports deleteMode 'delete'");
-	s.check(deletedPaths.includes("Notes/fallback-deleted.md"), "diskMirror falls back to hard delete");
+	s.check(!deleteApplied, "failed trash does not emit remote-delete-applied");
+	s.check(deletedPaths.length === 0, "diskMirror never falls back to hard delete");
 }
 
 s.section("Test 7: diskMirror remote delete preserves locally modified markdown");
@@ -475,13 +471,12 @@ s.section("Test 10: diskMirror remote delete suppression fires before delete");
 	s.check(trashedPaths.length === 1, "file was trashed");
 }
 
-s.section("Test 11: diskMirror remote delete falls back when trash throws");
+s.section("Test 11: diskMirror preserves the file when trash throws");
 {
 	const events: CapturedTrace[] = [];
 	const deletedPaths: string[] = [];
 
 	const file = makeFile("Notes/trash-throws.md", { ctime: 1, mtime: 1, size: 10 });
-
 	const matchingContent = "same content";
 	const crdtText = makeCrdtText(matchingContent);
 	const app = makeApp({
@@ -495,7 +490,6 @@ s.section("Test 11: diskMirror remote delete falls back when trash throws");
 			getActiveViewOfType: () => null,
 		},
 		fileManager: {
-			// Trash throws — simulating adapter that doesn't support system trash
 			trashFile: async () => { throw new Error("trash not supported"); },
 		},
 	});
@@ -512,9 +506,8 @@ s.section("Test 11: diskMirror remote delete falls back when trash throws");
 	await mirror["handleRemoteDelete"]("Notes/trash-throws.md");
 
 	const deleted = findEvent(events, "disk", "remote-delete-applied");
-	s.check(!!deleted, "delete still applied after trash failure");
-	s.check(deleted?.details?.deleteMode === "delete", "falls back to hard delete");
-	s.check(deletedPaths.includes("Notes/trash-throws.md"), "vault.delete called");
+	s.check(!deleted, "trash failure does not emit remote-delete-applied");
+	s.check(deletedPaths.length === 0, "trash failure never falls back to vault.delete");
 }
 
 s.section("Test 12: known-dirty remote delete revives tombstone (no loop)");

@@ -266,7 +266,7 @@ export class VaultSync {
 	/** Buffered renames for batch flush. */
 	private _renameBatch: Map<string, string> = new Map(); // oldPath -> newPath
 	private _renameBatchNewToOld: Map<string, string> = new Map(); // newPath -> oldPath
-	private _renameTimer: ReturnType<typeof setTimeout> | null = null;
+	private _renameTimer: number | null = null;
 	/** Callback invoked after a rename batch is flushed. */
 	private _onRenameBatchFlushed: ((renames: Map<string, string>) => void) | null = null;
 
@@ -290,7 +290,7 @@ export class VaultSync {
 	} | null>) | null = null;
 
 	/** Timer handle for the proactive provider URL ticket refresh. */
-	private _socketTicketRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+	private _socketTicketRefreshTimer: number | null = null;
 
 
 	constructor(
@@ -503,14 +503,14 @@ export class VaultSync {
 		if (this._idbError) return Promise.resolve(false);
 
 		return new Promise((resolve) => {
-			const timeout = setTimeout(() => {
+			const timeout = window.setTimeout(() => {
 				this.log("IndexedDB persistence timed out — proceeding without cache");
 				resolve(false);
 			}, LOCAL_PERSISTENCE_TIMEOUT_MS);
 
 			// Resolve on successful sync
 			this.persistence.once("synced", () => {
-				clearTimeout(timeout);
+				window.clearTimeout(timeout);
 				this._localReady = true;
 				this._pathIndexesDirty = true;
 				this.log(
@@ -523,7 +523,7 @@ export class VaultSync {
 			// Also resolve (false) if IDB errors out after we started waiting
 			this.persistence._db
 				.catch(() => {
-					clearTimeout(timeout);
+					window.clearTimeout(timeout);
 					this.captureIndexedDbError(new Error("IndexedDB failed during waitForLocalPersistence"), "wait");
 					this.log("IndexedDB errored during wait — proceeding without cache");
 					resolve(false);
@@ -540,13 +540,13 @@ export class VaultSync {
 			const finish = (value: boolean) => {
 				if (settled) return;
 				settled = true;
-				clearTimeout(timeout);
+				window.clearTimeout(timeout);
 				this.provider.off("sync", check);
 				this._providerSyncWaiters.delete(finish);
 				resolve(value);
 			};
 
-			const timeout = setTimeout(() => {
+			const timeout = window.setTimeout(() => {
 				this.log("Provider sync timed out — entering offline mode");
 				finish(false);
 			}, PROVIDER_SYNC_TIMEOUT_MS);
@@ -1589,8 +1589,8 @@ export class VaultSync {
 		}
 
 		// Reset the debounce timer
-		if (this._renameTimer) clearTimeout(this._renameTimer);
-		this._renameTimer = setTimeout(() => this.flushRenameBatch(), RENAME_BATCH_MS);
+		if (this._renameTimer) window.clearTimeout(this._renameTimer);
+		this._renameTimer = window.setTimeout(() => this.flushRenameBatch(), RENAME_BATCH_MS);
 	}
 
 	isPendingRenameTarget(path: string): boolean {
@@ -1648,7 +1648,7 @@ export class VaultSync {
 
 		this.deletePendingRenameByOldPath(pendingOldPath);
 		if (this._renameBatch.size === 0 && this._renameTimer) {
-			clearTimeout(this._renameTimer);
+			window.clearTimeout(this._renameTimer);
 			this._renameTimer = null;
 		}
 
@@ -1989,7 +1989,7 @@ export class VaultSync {
 		const ttlRemaining = ticket.localExpiresAt - Date.now();
 		const buffer = Math.min(TICKET_REFRESH_BUFFER_MS, Math.floor(ttlRemaining / 2));
 		const msUntilRefresh = Math.max(250, ttlRemaining - buffer);
-		this._socketTicketRefreshTimer = setTimeout(() => {
+		this._socketTicketRefreshTimer = window.setTimeout(() => {
 			this._socketTicketRefreshTimer = null;
 			void this.refreshProviderTicketUrl(true);
 		}, msUntilRefresh);
@@ -1997,7 +1997,7 @@ export class VaultSync {
 
 	private clearSocketTicketRefreshTimer(): void {
 		if (this._socketTicketRefreshTimer !== null) {
-			clearTimeout(this._socketTicketRefreshTimer);
+			window.clearTimeout(this._socketTicketRefreshTimer);
 			this._socketTicketRefreshTimer = null;
 		}
 	}
@@ -2037,7 +2037,7 @@ export class VaultSync {
 			// is already scheduled: without the clear, the proactive timer
 			// handle is overwritten but the timer still fires.
 			this.clearSocketTicketRefreshTimer();
-			this._socketTicketRefreshTimer = setTimeout(() => {
+			this._socketTicketRefreshTimer = window.setTimeout(() => {
 				this._socketTicketRefreshTimer = null;
 				void this.refreshProviderTicketUrl(true);
 			}, TICKET_REFRESH_BUFFER_MS);
@@ -2046,7 +2046,7 @@ export class VaultSync {
 
 	async destroy(): Promise<void> {
 		this.log("Destroying VaultSync");
-		if (this._renameTimer) clearTimeout(this._renameTimer);
+		if (this._renameTimer) window.clearTimeout(this._renameTimer);
 		this.clearSocketTicketRefreshTimer();
 		this.clearPendingRenames();
 		await this.flushReceiptPersistence();

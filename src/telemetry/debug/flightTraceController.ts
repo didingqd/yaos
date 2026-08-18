@@ -49,7 +49,7 @@ function canonicalizeHost(host: string): string {
 export class FlightTraceController {
 	private recorder: FlightRecorder | null = null;
 	private pathIdentity: PathIdentityResolver | null = null;
-	private checkpointTimer: ReturnType<typeof setInterval> | null = null;
+	private checkpointTimer: number | null = null;
 	private enabled = false;
 	private pathSalt: string | null = null;
 	private saltFingerprint: string | null = null;
@@ -375,14 +375,14 @@ export class FlightTraceController {
 
 	private startCheckpointLoop(): void {
 		if (this.checkpointTimer) return;
-		this.checkpointTimer = setInterval(() => {
+		this.checkpointTimer = window.setInterval(() => {
 			void this.emitCheckpoint();
 		}, DEFAULT_CHECKPOINT_MS);
 	}
 
 	private stopCheckpointLoop(): void {
 		if (this.checkpointTimer) {
-			clearInterval(this.checkpointTimer);
+			window.clearInterval(this.checkpointTimer);
 			this.checkpointTimer = null;
 		}
 	}

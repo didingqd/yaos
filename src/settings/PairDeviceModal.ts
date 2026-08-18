@@ -35,7 +35,7 @@ export class PairDeviceModal extends Modal {
 
 		const qrWrap = contentEl.createDiv({ cls: "yaos-pair-device-qr-wrap" });
 
-		const loadingEl = qrWrap.createEl("div", {
+		const loadingEl = qrWrap.createDiv({
 			text: "Generating setup code...",
 			cls: "yaos-pair-device-loading",
 		});

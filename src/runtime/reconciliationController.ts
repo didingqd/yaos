@@ -275,12 +275,12 @@ export class ReconciliationController {
 	private untrackedFiles: string[] = [];
 	private lastReconciledGeneration = 0;
 	private lastReconcileTime = 0;
-	private reconcileCooldownTimer: ReturnType<typeof setTimeout> | null = null;
+	private reconcileCooldownTimer: number | null = null;
 	private lastReconcileStats: ReconciliationStats | null = null;
 	private dirtyMarkdownPaths = new Map<string, { reason: "create" | "modify"; primaryOpId?: string; coalescedOpIds: string[] }>();
 	private closedOnlyDeferredImports = new Set<string>();
 	private markdownDrainPromise: Promise<void> | null = null;
-	private markdownDrainTimer: ReturnType<typeof setTimeout> | null = null;
+	private markdownDrainTimer: number | null = null;
 	private lastMarkdownDirtyAt = 0;
 	private boundRecoveryLocks = new Map<string, number>();
 	private recoveryFingerprints = new Map<string, FingerprintEntry>();
@@ -363,11 +363,11 @@ export class ReconciliationController {
 
 	reset(): void {
 		if (this.reconcileCooldownTimer) {
-			clearTimeout(this.reconcileCooldownTimer);
+			window.clearTimeout(this.reconcileCooldownTimer);
 			this.reconcileCooldownTimer = null;
 		}
 		if (this.markdownDrainTimer) {
-			clearTimeout(this.markdownDrainTimer);
+			window.clearTimeout(this.markdownDrainTimer);
 			this.markdownDrainTimer = null;
 		}
 		this.reconciled = false;
@@ -441,7 +441,7 @@ export class ReconciliationController {
 			this.deps.log(`Reconcile cooldown: ${delay}ms remaining, scheduling delayed run`);
 			this.reconcilePending = true;
 			if (!this.reconcileCooldownTimer) {
-				this.reconcileCooldownTimer = setTimeout(() => {
+				this.reconcileCooldownTimer = window.setTimeout(() => {
 					this.reconcileCooldownTimer = null;
 					if (this.reconcilePending) {
 						this.reconcilePending = false;
@@ -1265,11 +1265,11 @@ export class ReconciliationController {
 
 	private scheduleMarkdownDrain(): void {
 		if (this.markdownDrainTimer) {
-			clearTimeout(this.markdownDrainTimer);
+			window.clearTimeout(this.markdownDrainTimer);
 		}
 		const elapsed = Date.now() - this.lastMarkdownDirtyAt;
 		const delay = Math.max(0, MARKDOWN_DIRTY_SETTLE_MS - elapsed);
-		this.markdownDrainTimer = setTimeout(() => {
+		this.markdownDrainTimer = window.setTimeout(() => {
 			this.markdownDrainTimer = null;
 			const sinceLastDirty = Date.now() - this.lastMarkdownDirtyAt;
 			if (sinceLastDirty < MARKDOWN_DIRTY_SETTLE_MS) {
@@ -1752,8 +1752,10 @@ export class ReconciliationController {
 					ORIGIN_DISK_SYNC_RECOVER_BOUND,
 				);
 			traceRecoveryPostcondition(
-				this.deps.trace,
-				this.deps.recordFlightPathEvent,
+				(source, message, details) => this.deps.trace(source, message, details),
+				this.deps.recordFlightPathEvent
+					? (event) => this.deps.recordFlightPathEvent?.(event)
+					: undefined,
 				file.path,
 				"bound-file-local-only-divergence",
 				ORIGIN_DISK_SYNC_RECOVER_BOUND,
@@ -1919,7 +1921,7 @@ export class ReconciliationController {
 					path: file.path,
 					data: {
 						reason: "recent-editor-activity",
-						idleMs: Date.now() - lastEditorActivity!,
+						idleMs: Date.now() - lastEditorActivity,
 					},
 				});
 				return true;
@@ -1991,8 +1993,10 @@ export class ReconciliationController {
 					ORIGIN_DISK_SYNC_OPEN_IDLE_RECOVER,
 				);
 			traceRecoveryPostcondition(
-				this.deps.trace,
-				this.deps.recordFlightPathEvent,
+				(source, message, details) => this.deps.trace(source, message, details),
+				this.deps.recordFlightPathEvent
+					? (event) => this.deps.recordFlightPathEvent?.(event)
+					: undefined,
 				file.path,
 				"bound-file-open-idle-disk-recovery",
 				ORIGIN_DISK_SYNC_OPEN_IDLE_RECOVER,
@@ -2180,7 +2184,7 @@ export class ReconciliationController {
 			const existingText = vaultSync?.getTextForPath(file.path);
 			if (existingText) {
 				forceReplaceYText(existingText, editorAuthority, ORIGIN_DISK_SYNC_RECOVER_BOUND);
-				convergenceApplied = existingText.toString() === editorAuthority;
+				convergenceApplied = yTextToString(existingText) === editorAuthority;
 				if (convergenceApplied) {
 					// Convergence succeeded — the original path now matches disk.
 					// Clear the conflict fingerprint so a genuinely new divergence

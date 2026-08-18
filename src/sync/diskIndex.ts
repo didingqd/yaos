@@ -44,14 +44,14 @@ export function contentFingerprint(text: string): string {
  * YAOS to decide "disk unchanged" and overwrite a local edit without conflict
  * preservation, resulting in silent data loss.
  *
- * Implementation: Web Crypto API (`globalThis.crypto.subtle`).
+ * Implementation: Web Crypto API (`window.crypto.subtle`).
  * This is the same path used by blobSync, diskMirror.fingerprintContent, and
  * indexedDbCandidateStore.sha256Hex — proven to work on iOS, Android, and desktop.
  * Does NOT use Node's `crypto` module, which is unavailable in mobile WebViews.
  */
 export async function contentBaselineHash(content: string): Promise<string> {
 	const bytes = new TextEncoder().encode(content);
-	const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+	const digest = await window.crypto.subtle.digest("SHA-256", bytes);
 	return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
@@ -274,7 +274,7 @@ export async function waitForDiskQuiet(
 		last = stat;
 
 		if (i < checks - 1) {
-			await new Promise((r) => setTimeout(r, delayMs));
+			await new Promise((r) => window.setTimeout(r, delayMs));
 		}
 	}
 
