@@ -14,7 +14,6 @@ import {
 	hasSnapshotForDay,
 	getLatestSnapshotIndex,
 	verifySnapshotExists,
-	computeFullUpdateHash,
 	applyRetention,
 	type SnapshotResult,
 } from "./snapshot";

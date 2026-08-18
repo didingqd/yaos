@@ -1,4 +1,4 @@
-import { MarkdownView, Modal, Notice, Plugin, TFile, arrayBufferToHex } from "obsidian";
+import { MarkdownView, Notice, Plugin, TFile, arrayBufferToHex } from "obsidian";
 import {
 	DEFAULT_SETTINGS,
 	VaultSyncSettingTab,
@@ -89,7 +89,6 @@ import { formatUnknown, yTextToString } from "./utils/format";
 import { randomId } from "./utils/randomId";
 import { ConfirmModal } from "./ui/ConfirmModal";
 import { runSchemaMigrationToV2 } from "./migrations/schemaV2";
-import { isLocalOrigin } from "./sync/origins";
 import { installTelemetryRuntime, type TelemetryRuntimeHandle } from "./telemetry/installTelemetryRuntime";
 import type { SyncReadPort, TelemetryRuntimeHost } from "./telemetry/telemetryRuntimeHost";
 import type { EngineControlPort, DiskIngestPort } from "./runtime/engineControlPort";
@@ -762,6 +761,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 			};
 			this.editorBindings = new EditorBindingManager(
 				this.vaultSync,
+				this.app.workspace,
 				this.settings.debug,
 				(source, msg, details) => this.trace(source, msg, details),
 				(event) => this.recordFlightPathEvent(event),

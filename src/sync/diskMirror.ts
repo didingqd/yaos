@@ -4,7 +4,6 @@ import type { VaultSync } from "./vaultSync";
 import type { EditorBindingManager } from "./editorBinding";
 import type { TraceRecord } from "../observability/traceContext";
 import { getMetaPath, isFileMetaDeletedValue } from "./fileMeta";
-import type { MetaChangeBatch } from "./fileMeta";
 import { formatUnknown, yTextToString } from "../utils/format";
 import {
 	isFrontmatterBlocked,

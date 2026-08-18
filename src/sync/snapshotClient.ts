@@ -12,7 +12,7 @@
 import * as Y from "yjs";
 import { gunzipSync } from "fflate";
 import type { VaultSyncSettings } from "../settings";
-import type { FileMeta, BlobRef } from "../types";
+import type { BlobRef } from "../types";
 import { appendTraceParams, type TraceHttpContext } from "../observability/traceContext";
 import { obsidianRequest } from "../utils/http";
 import { yTextToString } from "../utils/format";

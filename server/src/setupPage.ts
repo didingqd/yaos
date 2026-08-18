@@ -23,19 +23,6 @@ function escapeHtml(value: string): string {
 		.replace(/"/g, "&quot;");
 }
 
-const IS_MARKETPLACE_APPROVED = true;
-const DEFAULT_DEPLOY_REPO = "kavinsood/yaos";
-
-function normalizeDeployRepo(value: string | undefined): string {
-	const raw = value?.trim();
-	if (!raw) return DEFAULT_DEPLOY_REPO;
-	// Keep this strict: owner/repo style slug only.
-	if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(raw)) {
-		return DEFAULT_DEPLOY_REPO;
-	}
-	return raw;
-}
-
 export function renderSetupPage(options: SetupPageOptions): string {
 	const safeHost = escapeHtml(options.host);
 

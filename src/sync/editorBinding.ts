@@ -2,7 +2,7 @@ import { Compartment, type Extension } from "@codemirror/state";
 import { EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 import { yCollab, ySyncFacet } from "y-codemirror.next";
 import * as Y from "yjs";
-import { editorInfoField, Notice, type MarkdownFileInfo, type MarkdownView } from "obsidian";
+import { editorInfoField, MarkdownView, Notice, type MarkdownFileInfo, type Workspace } from "obsidian";
 import type { VaultSync } from "./vaultSync";
 import { applyDiffToYText } from "./diff";
 import type { TraceRecord } from "../observability/traceContext";
@@ -149,6 +149,7 @@ export class EditorBindingManager {
 
 	constructor(
 		private vaultSync: VaultSync,
+		private readonly workspace: Workspace,
 		debug: boolean,
 		private trace?: TraceRecord,
 		private recordFlightPathEvent?: (event: ProductFlightPathEventInput) => void,
@@ -1491,7 +1492,8 @@ export class EditorBindingManager {
 		source: string,
 		issues: string[],
 	): Record<string, unknown> {
-		const activeLeaf = binding.view.leaf.workspace?.activeLeaf;
+		const isActiveView =
+			this.workspace.getActiveViewOfType(MarkdownView) === binding.view;
 		return {
 			leafId,
 			path: binding.path,
@@ -1500,7 +1502,7 @@ export class EditorBindingManager {
 			issues,
 			binding: this.getBindingDebugInfoForView(binding.view),
 			collab: this.getCollabDebugInfoForView(binding.view),
-			isActiveLeaf: binding.view.leaf === activeLeaf,
+			isActiveLeaf: isActiveView,
 			documentHasFocus: typeof document !== "undefined" ? document.hasFocus() : null,
 		};
 	}
@@ -1511,8 +1513,8 @@ export class EditorBindingManager {
 			return false;
 		}
 
-		const activeLeaf = view.leaf.workspace?.activeLeaf;
-		const isActiveLeaf = view.leaf === activeLeaf;
+		const isActiveLeaf =
+			this.workspace.getActiveViewOfType(MarkdownView) === view;
 		if (isActiveLeaf) {
 			return true;
 		}

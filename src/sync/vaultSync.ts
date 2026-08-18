@@ -2,7 +2,7 @@ import * as Y from "yjs";
 import YSyncProvider from "y-partyserver/provider";
 import { IndexeddbPersistence } from "y-indexeddb";
 import { normalizePath } from "obsidian";
-import { type FileMeta, type BlobRef, type BlobMeta, type BlobTombstone } from "../types";
+import { type BlobRef, type BlobMeta, type BlobTombstone } from "../types";
 import {
 	decodeFileMeta,
 	getMetaPath,
@@ -10,7 +10,6 @@ import {
 	isFileMetaDeletedValue,
 	ensureNestedMetaEntry,
 	createNestedActiveMeta,
-	createNestedDeletedMeta,
 	buildMetaSnapshot,
 	computeMetaSemanticChanges,
 	computeMetaShapeStats,
@@ -131,7 +130,7 @@ type ServerReceiptStartupValidation =
  * Schema:
  *   pathToId:        Y.Map<string>         — vault-relative path -> stable fileId (markdown)
  *   idToText:        Y.Map<Y.Text>         — fileId -> Y.Text (markdown content)
- *   meta:            Y.Map<FileMeta>       — fileId -> metadata { path, deleted?, mtime? }
+ *   meta:            Y.Map<Y.Map<unknown>>  — fileId -> nested metadata fields
  *   sys:             Y.Map<unknown>        — sentinel/bookkeeping { initialized, lastSync }
  *   pathToBlob:      Y.Map<BlobRef>        — vault-relative path -> { hash, size }
  *   blobMeta:        Y.Map<BlobMeta>       — sha256 hex -> { size, mime, createdAt }
