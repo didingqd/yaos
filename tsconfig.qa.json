@@ -17,6 +17,7 @@
 		"lib": ["ES2023", "DOM"],
 		"module": "ESNext",
 		"types": ["node"],
+		"skipLibCheck": true,
 		"noEmit": true
 	},
 	"include": [
