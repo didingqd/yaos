@@ -491,8 +491,7 @@ export default class VaultCrdtSyncPlugin extends Plugin {
 							get blobPathCount() { return vs.pathToBlob.size; },
 							getPathContent: (path: string) => {
 								const ytext = vs.getTextForPath(path);
-								// eslint-disable-next-line @typescript-eslint/no-base-to-string
-								return ytext ? ytext.toString() : null;
+								return ytext ? ytext.toJSON() : null;
 							},
 							getFileIdForPath: (path: string) => {
 								const ytext = vs.getTextForPath(path);
