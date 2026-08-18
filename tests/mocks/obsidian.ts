@@ -29,6 +29,24 @@ export class Notice {
 
 /** Stub class. Type-only in DiskMirror but exported for completeness. */
 export class App {}
+/** Base classes needed by declarative settings tests. */
+export class Plugin {}
+
+export class PluginSettingTab {
+	readonly app: App;
+	readonly plugin: Plugin;
+	updateCount = 0;
+
+	constructor(app: App, plugin: Plugin) {
+		this.app = app;
+		this.plugin = plugin;
+	}
+
+	update(): void {
+		this.updateCount++;
+	}
+}
+
 
 /** Stub class. ConfirmModal extends Modal — needs to exist as a constructor. */
 export class Modal {
