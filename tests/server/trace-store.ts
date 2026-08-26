@@ -182,7 +182,7 @@ s.section("Test 7: default budget is the documented per-room rate");
 {
 	s.check(
 		DEFAULT_TRACE_RATE_LIMIT_PER_WINDOW === 600,
-		"default per-window cap matches sync-invariants.md draft target (600 events / 60s)",
+		"default per-window cap is 600 events / 60s",
 	);
 }
 

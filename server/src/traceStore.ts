@@ -29,9 +29,8 @@ const MAX_TRACE_DEPTH = 4;
  * an admit succeeds, so the loss is observable but does not itself cause
  * unbounded writes.
  *
- * The default budget (600 events / 60s) is the draft target named in
- * sync-invariants.md and tightenable per workload. Constructor allows
- * tests and DO code to override.
+ * The default budget is 600 events per 60 seconds. Constructor parameters let
+ * tests and the Durable Object tighten it for a workload.
  */
 export const DEFAULT_TRACE_RATE_LIMIT_PER_WINDOW = 600;
 export const DEFAULT_TRACE_RATE_WINDOW_MS = 60_000;

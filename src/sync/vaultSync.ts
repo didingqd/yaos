@@ -404,9 +404,8 @@ export class VaultSync {
 				// (setupWS) reuses provider.url directly without re-calling
 				// params().  VaultSync keeps provider.url fresh via
 				// scheduleSocketTicketRefresh so reconnects always carry a live
-				// ticket.  See docs/architecture/zero-config-auth.md § "Reconnect
-				// behavior" and docs/architecture/warts-and-limits.md § "Pragmatic
-				// compromises".
+				// ticket. See docs/architecture.md § Authentication and schema
+				// admission.
 				const ticketResult = this._getSocketTicket ? await this._getSocketTicket() : null;
 				if (ticketResult) {
 					p.ticket = ticketResult.value;

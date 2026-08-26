@@ -1,16 +1,16 @@
 # YAOS
 
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/kavinsood/yaos/tree/main/server)
+
 **A zero-terminal, real-time sync engine for Obsidian, powered by your own Cloudflare Worker.**
 
 Your notes sync live across devices, with CRDT merge semantics instead of conflicted-copy workflows, delayed file sync, or database-heavy hosted services.
 
 <img src="https://github.com/user-attachments/assets/ee937050-8a05-4d56-9c5f-3ae5003496fc" alt="YAOS syncing a note across desktop and mobile in real time" width="720" />
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/kavinsood/yaos/tree/main/server)
+No terminal, no `.env` files, no database setup required.
 
 [![License: 0-BSD](https://img.shields.io/badge/license-0--BSD-green)](LICENSE)
-
-No terminal, no `.env` files, no database setup required.
 
 ## How it compares
 
@@ -26,7 +26,7 @@ YAOS chooses live Markdown CRDT sync on infrastructure you deploy in your Cloudf
 
 YAOS uses [Yjs CRDTs](https://yjs.dev) to keep one live vault state moving across devices instead of asking them to take polite turns uploading files and hoping nothing collides.
 
-If you want the official, fully managed experience, pay for Obsidian Sync and support the team. If you want a fast, self-deployed, local-first alternative on your own Cloudflare account, this is YAOS.
+If you want the official, fully managed experience, pay for Obsidian Sync and support the team. If you want a fast, self-deployed, local-first alternative on your own Cloudflare account, welcome to YAOS!
 
 ## Get started
 
@@ -60,101 +60,11 @@ Text sync works out of the box. To sync images, PDFs, and other attachments, add
 
 R2 also enables daily automatic snapshots and on-demand point-in-time backups. You can browse snapshots, diff against current state, and selectively restore individual files. If you skip R2, text sync still works — you just won't have attachment sync or snapshots.
 
-## Updating your server
-
-YAOS is designed to be zero-terminal, but because you own your infrastructure, you control when updates apply.
-
-A one-time setup installs a GitHub Actions workflow in your deployment repo. After that, updates are a single click.
-
-1. **One-time**: click **Initialize updater** in YAOS settings → **Advanced**. GitHub opens with a pre-filled workflow file. Commit it.
-2. **Update**: YAOS notifies you when a new version ships. Click **Open update action** → **Run workflow** with `update`.
-3. **Rollback**: same workflow, change action to `revert`.
-
-Some releases require manual migration steps. The updater will abort with a clear warning — read the release notes before retrying. Re-clicking Deploy to Cloudflare is not a safe update path for a stateful server; YAOS uses a Git-driven workflow so the same Worker identity, Durable Object bindings, and history are preserved.
-
-## Works with scripts and AI agents
+## Works with AI agents
 
 Because Obsidian vaults are just local Markdown files, YAOS plays unusually well with scripts, CLI tools, and AI agents that edit files directly on disk. The CRDT state stays aligned with the filesystem, so changes from any source — git, shell scripts, agents writing to disk — propagate cleanly across devices instead of falling back to conflicted-copy workflows.
 
 If you're building agentic workflows on top of Obsidian vaults, YAOS gives you the sync infrastructure so you don't have to wire up your own.
-
-## How it works
-
-YAOS keeps your vault as normal local files, while also maintaining a shared real-time state for sync.
-
-1. Each markdown file gets a stable ID and a `Y.Text` CRDT for its content.
-2. All per-file CRDTs live inside one shared vault-level `Y.Doc` — this keeps cross-file operations transactional. A folder rename is atomic across all files; the vault structure can't tear.
-3. Live editor edits flow through a Yjs + CodeMirror binding.
-4. Each vault maps to one Durable Object sync room. The shared state survives server restarts and hibernation.
-5. Offline edits are stored in IndexedDB and merge on reconnect.
-6. Attachments sync separately via content-addressed R2 storage instead of being forced through the text CRDT.
-7. Daily and on-demand snapshots exist as a safety net.
-
-In practice, that means your vault still exists locally as normal files, Obsidian keeps behaving like Obsidian, and YAOS keeps the disk mirror and the shared CRDT state aligned instead of asking devices to take polite turns uploading files later.
-
-## Engineering
-
-Durable architecture, engineering, RFC, QA, and historical-reference material
-lives in the [documentation index](./docs/README.md). Contributors looking for
-current project truth should start with:
-
-- [Active threads](./docs/engineering/active-threads.md)
-- [Follow-ups](./docs/engineering/followups.md)
-- [Bug and RCA ledger](./docs/engineering/bug-rca-ledger.md)
-- [Layer 4 harness status](./docs/qa/layer4-harness-status.md)
-
-Key architecture references:
-
-- [Monolithic vault CRDT](./docs/architecture/monolith.md)
-- [Filesystem bridge](./docs/architecture/filesystem-bridge.md)
-- [Checkpoint journal](./docs/architecture/checkpoint-journal.md)
-- [Attachment sync](./docs/architecture/attachment-sync.md)
-- [Zero-config authentication](./docs/architecture/zero-config-auth.md)
-- [Zero-ops update pipeline](./docs/rfcs/zero-ops-update-pipeline.md)
-- [Warts and limits](./docs/architecture/warts-and-limits.md)
-
-## Limits
-
-YAOS is optimized for personal or small-team note vaults, not for arbitrarily huge text archives. The monolithic `Y.Doc` design gives excellent real-time ergonomics and simpler cross-file behavior, but it creates a practical ceiling for very large vaults.
-
-If your vault is normal notes, drafts, research, and attachments, YAOS is a great fit. If you want to sync giant text dumps or archival datasets, a simpler file-sync tool is a better choice.
-
-Rule of thumb: the limit is not the size of your vault, it is how scattered your editing is. The constraint is memory, not disk, and what consumes it is the number of CRDT items — roughly 117 bytes each, against a 128 MB budget. Typing continuously in one note merges into a handful of items, so pasting a 12 MB file costs almost nothing and a large vault of ordinary notes is fine. What is expensive is a very large number of small edits spread across many files — an automated script appending to thousands of notes in a loop is the shape that will eventually exhaust it, and that cost does not come back. For hand-written vaults, including big ones, you are unlikely to reach it.
-
-## Configuration
-
-After enabling, go to **Settings → YAOS**.
-
-| Setting | Description |
-|---------|-------------|
-| **Server URL** | Your Worker URL (e.g. `https://sync.yourdomain.com`) |
-| **Sync token** | Filled automatically by the setup link after claiming |
-| **Device name** | Shown to other devices in live cursors and presence |
-| **Exclude paths** | Comma-separated prefixes to skip (e.g. `templates/, .trash/`) |
-| **Max text file size** | Skip text files larger than this for live document sync |
-| **Sync attachments** | Enable R2 sync for images, PDFs, and other non-markdown files |
-| **Max attachment size** | Skip attachments larger than this (default and current server cap: 10 MB) |
-| **Parallel transfers** | Number of simultaneous attachment upload/download slots |
-| **Show remote cursors** | Display cursor positions and selections from other devices |
-| **Edits from other apps** | Control how YAOS handles changes from git, scripts, or other editors |
-| **Debug logging** | Verbose console output for troubleshooting |
-
-`Manual connection` and `Advanced` sections are available in the settings UI when you need to inspect or override connection details.
-
-## Commands
-
-Access via command palette (Ctrl/Cmd+P):
-
-| Command | Description |
-|---------|-------------|
-| **Reconnect to sync server** | Force reconnect after network changes |
-| **Force reconcile** | Re-merge disk state with CRDT |
-| **Show sync debug info** | Connection state, file counts, queue status |
-| **Clear local server-receipt state** | Clear this device's local server receipt candidate and historical receipt timestamp |
-| **Take snapshot now** | Create an immediate backup to R2 |
-| **Browse and restore snapshots** | View snapshots, diff against current state, selective restore |
-| **Reset local cache** | Clear IndexedDB, re-sync from server |
-| **Nuclear reset** | Wipe all CRDT state everywhere, re-seed from disk |
 
 ## Troubleshooting
 
@@ -162,30 +72,14 @@ Access via command palette (Ctrl/Cmd+P):
 
 **"R2 not configured"**: The server doesn't have a `YAOS_BUCKET` binding yet. See the [R2 setup video](https://youtu.be/Z7xCMEYfdFM).
 
-**Cloudflare deploy/dashboard issues**: If build queue or dashboard behavior is flaky, see [server troubleshooting notes](./docs/engineering/server-deployment.md#cloudflare-deployment-quirks), including the `wrangler.toml` R2-binding fallback.
+**Cloudflare deploy/dashboard issues**: If build queue or dashboard behavior is flaky, see [operations](./docs/operations.md#troubleshooting), including the `wrangler.toml` R2-binding fallback.
 
 **Sync stops on mobile**: Use "Reconnect to sync server" command. Check you have network connectivity.
 
 **Files not syncing**: Check exclude patterns. Files over max size are skipped. Use debug logging to see what's happening, and then raise an issue on GitHub.
 
-**Conflicts after offline edits**: CRDTs merge automatically but the result depends on operation order. Review merged content if needed.
-
-**Server receipt is unknown or waiting**: Reconnect first. If local cache replay timed out, wait for the vault to finish loading and reconnect again. Server receipt reflects server-side confirmation of this device's recent local state; it does not mean another device has applied the change, and it is not the same as snapshot durability. If you recently reset, reclaimed, or migrated the server, run **Clear local server-receipt state** from the command palette; the local receipt state cannot automatically detect every same-vault server reset.
-
-**Diagnostics**: Use **Show sync debug info** for local inspection. Safe diagnostics exports redact server URL, vault ID, device name, and vault paths; filename-inclusive diagnostics require explicit confirmation before writing.
-
-## Current limits
-
-YAOS currently treats Markdown text as the first-class live sync surface and syncs
-attachments separately through R2 when configured. It does not try to act as a
-general `.obsidian` settings/plugin-state sync engine. Empty folders are not synced
-in v0 because the CRDT tracks files and blob references, not folder-only objects.
-Avoid running another live file-sync engine such as iCloud, Dropbox, Syncthing, or
-Git auto-sync against the same vault at the same time unless you understand the
-interaction.
+**Diagnostics**: Use **Show sync debug info** for local inspection. Safe diagnostics exports redact server URL, vault ID, device name, and vault paths.
 
 ## License
 
 [0-BSD](LICENSE)
-
-**Acknowledgements:** The initial landing page design was heavily inspired by and utilizes assets from the excellent folks at [superwhisper](https://superwhisper.com). Huge thanks to their creator for permitting temporary use while we fully redesign. (P.S. They are hiring!).

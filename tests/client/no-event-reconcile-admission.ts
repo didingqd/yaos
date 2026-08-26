@@ -1,10 +1,8 @@
 /**
  * No-event reconcile admission regression test.
- *
- * Followup closed: `docs/engineering/followups.md` "Validation gaps" entry
- *   "No-event reconcile admission" — concrete proof that a syncable file
- *   appearing on disk without the normal vault create event pipeline is
- *   admitted by reconcile rather than becoming a silent local-only file.
+ * Regression for no-event reconcile admission: a syncable file appearing on
+ * disk without the normal vault create event must enter CRDT rather than remain
+ * silently local-only.
  *
  * ============================================================================
  * Architectural decision (Requirement 2.1)

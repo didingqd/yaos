@@ -26,8 +26,8 @@ export interface ClosedFileConflictInput {
 	 * Persisted in data.json as _lastDiskIndexPersistedAt.
 	 * Semantics: "last time YAOS durably persisted disk-index baselines."
 	 * This is a GLOBAL heuristic — not per-file. It can produce false negatives
-	 * when an unrelated file triggers a save after the target file was modified
-	 * (see docs/engineering/bug-rca-ledger.md Issue #22-B for the known limits).
+	 * when an unrelated file triggers a save after the target file was modified.
+	 * See docs/BACKLOG.md QA-03 for the known limits.
 	 * Optional — when absent, mtime evidence is not used.
 	 */
 	lastDiskIndexPersistedAt?: number;
@@ -50,28 +50,10 @@ export function decideClosedFileConflict(
 	if (diskHash === crdtHash) return { kind: "no-op" };
 
 	if (baselineHash === null) {
-		// No persisted baseline — unknown who changed what.
-		//
-		// Use mtime evidence to break the tie. Heuristic:
-		//   If the disk file's mtime is strictly AFTER the last time YAOS
-		//   durably persisted its disk-index state, the file was likely edited
-		//   while YAOS was inactive/killed/suspended. Disk wins the main file;
-		//   CRDT remote content is preserved as a conflict artifact.
-		//
-		//   This addresses Issue #22-B ("I turned YAOS off, edited my note,
-		//   turned it back on, and lost my edits" — the cold-relaunch / process-
-		//   killed variant where no baseline was persisted before death).
-		//
-		// Known limits of this heuristic (documented, not hidden):
-		//   - Global timestamp: an unrelated file triggering a save AFTER the
-		//     target file's mtime can make disk look "not newer," causing CRDT
-		//     to win even though the user made a local edit.
-		//   - mtime coarseness: filesystems with 1-second precision, external
-		//     editors that preserve mtime, or iCloud/Android document providers
-		//     may produce unexpected mtime values.
-		//   - When either input is absent, falls back to CRDT wins (safe default).
-		//
-		// See: docs/engineering/bug-rca-ledger.md Issue #22-B
+		// With no baseline, complete mtime evidence can show that disk changed
+		// after YAOS last persisted its disk index. Disk then wins and CRDT is
+		// preserved; otherwise CRDT is the conservative default. The global
+		// timestamp/filesystem limits are tracked in docs/BACKLOG.md QA-03.
 		const hasMtimeEvidence =
 			diskMtime !== undefined &&
 			lastDiskIndexPersistedAt !== undefined;

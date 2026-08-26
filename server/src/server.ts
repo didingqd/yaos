@@ -197,8 +197,8 @@ export class VaultSyncServer extends YServer<Env> {
 	 * There is no re-materialisation here, scheduled or manual, and no swap to
 	 * reinstate one.  The save path already encodes on every debounced save,
 	 * which flattens rope as a side effect; what remains is struct
-	 * fragmentation, which a round trip cannot merge.  Rationale and
-	 * measurements: docs/architecture/monolith.md.
+	 * fragmentation, which a round trip cannot merge. Rationale and
+	 * measurements: docs/architecture.md § Vault model.
 	 */
 
 	async onConnect(connection: Connection, ctx: ConnectionContext): Promise<void> {
