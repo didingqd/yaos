@@ -1439,11 +1439,10 @@ export class BlobSyncManager {
 	 * rename, or delete the artifact. If they want the remote version to sync,
 	 * they should replace the original file manually.
 	 *
-	 * Markdown conflict artifacts (from ReconciliationController) are created via
-	 * vault.create() WITHOUT suppression, so they DO sync. This difference is
-	 * deliberate: Markdown conflicts involve CRDT state that is already part of
-	 * the sync model, while blob conflicts involve raw binary data racing against
-	 * a local file change.
+	 * Markdown conflict artifacts are also local-only: `isMarkdownSyncable`
+	 * rejects their filename pattern so they never enter the CRDT. Minting is
+	 * capped per source path. Unbounded synced siblings previously wedged the
+	 * room Durable Object (issue #73).
 	 */
 	private async writeDownloadConflictArtifact(
 		targetPath: string,

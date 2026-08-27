@@ -13,6 +13,7 @@
 
 import { canonicalizeVaultPath, type CanonicalPath } from "./canonicalPath";
 import { isExcluded } from "../sync/exclude";
+import { isMarkdownConflictArtifactPath } from "../sync/markdownConflictArtifact";
 
 export type PathSyncCategory =
 	| { kind: "markdown"; path: CanonicalPath }
@@ -46,6 +47,9 @@ export function classifySyncPath(input: {
 
 	// Extension check on normalized path (same as isMarkdownSyncable).
 	if (canonical.normalizedPath.endsWith(".md")) {
+		if (isMarkdownConflictArtifactPath(canonical.normalizedPath)) {
+			return { kind: "excluded", path: canonical, reason: "local-only-conflict-artifact" };
+		}
 		return { kind: "markdown", path: canonical };
 	}
 

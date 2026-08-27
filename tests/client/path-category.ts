@@ -182,4 +182,11 @@ s.section("Test 20: dirty path cleanup uses displayPath");
 	s.check(action.kind === "tombstone-markdown" && action.dropDirty.includes("notes/file.md"), "drops old displayPath");
 	s.check(action.kind === "tombstone-markdown" && action.dropDirty.includes(".trash/file.md"), "drops new displayPath");
 }
+
+s.section("Test 21: markdown conflict artifact is local-only excluded");
+{
+	const cat = classify("Notes/idea (YAOS conflict - crdt from Laptop 2026-08-27T11-05-00Z).md");
+	s.check(cat.kind === "excluded", "conflict sibling is not markdown-syncable");
+	s.check(cat.kind === "excluded" && cat.reason === "local-only-conflict-artifact", "reason is local-only-conflict-artifact");
+}
 await s.done();

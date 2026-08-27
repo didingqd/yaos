@@ -3,6 +3,7 @@
  */
 
 import { isExcluded } from "./sync/exclude";
+import { isMarkdownConflictArtifactPath } from "./sync/markdownConflictArtifact";
 
 // -------------------------------------------------------------------
 // Markdown CRDT types
@@ -82,9 +83,12 @@ export { ORIGIN_SEED } from "./sync/origins";
 /**
  * Check if a vault-relative path is a markdown file eligible for CRDT sync.
  * Single choke point for all ".md" checks in the codebase.
+ *
+ * Markdown conflict artifacts are local-only: they must not enter the CRDT.
  */
 export function isMarkdownSyncable(path: string, excludePatterns: string[], configDir: string): boolean {
 	if (!path.endsWith(".md")) return false;
+	if (isMarkdownConflictArtifactPath(path)) return false;
 	return !isExcluded(path, excludePatterns, configDir);
 }
 
