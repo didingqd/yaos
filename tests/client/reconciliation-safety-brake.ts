@@ -944,16 +944,18 @@ s.section("Test 10: second reconcile after successful convergence does not creat
 	s.check(createdFiles.size === 2, "first pass creates CRDT and disk conflict artifacts");
 	s.check(ytext.toString() === editorContent, "first pass converges CRDT to editor");
 
-	// Second call: CRDT already matches disk, so it exits early via the
-	// crdtContent === content check in syncFileFromDisk. No second artifact.
-	// Reset CRDT to create ambiguity again and verify dedupe is cleared after convergence
+	// Second call: CRDT reset to a new three-way split. Fingerprint differs,
+	// but the per-path mint cap (one CRDT sibling + one disk sibling) holds.
 	ytext.delete(0, ytext.length);
 	ytext.insert(0, "new-crdt-version");
 	await controller["syncFileFromDisk"](file, "modify");
 
-	// This is a genuinely new divergence (different CRDT content), so a
-	// new artifact should be created.
-	s.check(createdFiles.size === 4, "genuinely new divergence creates new CRDT and disk conflict artifacts");
+	s.check(createdFiles.size === 2, "genuinely new divergence does not mint another pair");
+	s.check(ytext.toString() === editorContent, "second pass still converges CRDT to editor");
+	s.check(
+		traces.some((event) => event.msg === "conflict-artifact-capped"),
+		"second pass traces the per-path cap",
+	);
 
 	doc.destroy();
 }
@@ -1102,5 +1104,106 @@ s.section("Test 12: recovery fingerprint TTL prevents stale accumulation");
 	s.check(shouldQuarantine(path, "r", "a", "b") === false, "count 2 after reset: no quarantine");
 	// Third within TTL — now quarantines
 	s.check(shouldQuarantine(path, "r", "a", "b") === true, "count 3 after reset: quarantined");
+}
+
+s.section("Test 13: mutating three-way split does not mint unbounded artifacts");
+{
+	const path = "templater-loop.md";
+	let diskContent = "disk v0";
+	let editorContent = "editor v0";
+	let crdtContent = "crdt v0";
+	const doc = new Y.Doc();
+	const ytext = doc.getText("content");
+	ytext.insert(0, crdtContent);
+
+	const file = makeTFile(path);
+	const view = makeBoundView(file, () => editorContent);
+
+	const createdFiles = new Map<string, string>();
+	const traces: Array<{ source: string; msg: string; details?: Record<string, unknown> }> = [];
+	let diskIndex: DiskIndex = {};
+
+	const app = makeApp({
+		vault: {
+			read: async () => diskContent,
+			create: async (createdPath: string, content: string) => {
+				if (createdFiles.has(createdPath)) throw new Error("exists");
+				createdFiles.set(createdPath, content);
+				return makeTFile(createdPath);
+			},
+			getAbstractFileByPath: (candidate: string) => createdFiles.has(candidate) ? makeTFile(candidate) : null,
+		},
+		adapter: {
+			stat: async () => makeStat(16, diskContent.length),
+		},
+		workspace: {
+			iterateAllLeaves: (cb: (leaf: WorkspaceLeaf) => void) => {
+				cb(makeLeaf(view));
+			},
+		},
+	});
+
+	const vaultSync = fixture<VaultSync>({
+		getTextForPath: () => ytext,
+	});
+
+	const editorBindings = fixture<EditorBindingManager>({
+		isBound: () => true,
+		getBindingDebugInfoForView: () => null,
+		getCollabDebugInfoForView: () => null,
+		repair: () => false,
+		rebind: () => {},
+		unbindByPath: () => {},
+		getLastEditorActivityForPath: () => null,
+	});
+
+	const controller = new ReconciliationController({
+		app,
+		getSettings: () => makeSettings("Test Device"),
+		getRuntimeConfig: () => fixture<RuntimeConfig>({
+			maxFileSizeBytes: 0,
+			maxFileSizeKB: 0,
+			excludePatterns: [],
+			externalEditPolicy: "always",
+		}),
+		getVaultSync: () => vaultSync,
+		getDiskMirror: () => null,
+		getBlobSync: () => null,
+		getEditorBindings: () => editorBindings,
+		getDiskIndex: () => diskIndex,
+		setDiskIndex: (next: DiskIndex) => { diskIndex = next; },
+		isMarkdownPathSyncable: () => true,
+		shouldBlockFrontmatterIngest: () => false,
+		refreshServerCapabilities: async () => {},
+		validateOpenEditorBindings: () => {},
+		onReconciled: () => {},
+		getAwaitingFirstProviderSyncAfterStartup: () => false,
+		setAwaitingFirstProviderSyncAfterStartup: () => {},
+		saveDiskIndex: async () => {},
+		refreshStatusBar: () => {},
+		trace: (source: string, msg: string, details?: Record<string, unknown>) => {
+			traces.push({ source, msg, details });
+		},
+		scheduleTraceStateSnapshot: () => {},
+		log: () => {},
+	});
+
+	for (let i = 0; i < 6; i++) {
+		diskContent = `disk v${i}\n## Related\n## Reference`;
+		editorContent = `editor v${i}`;
+		crdtContent = `crdt v${i}`;
+		ytext.delete(0, ytext.length);
+		ytext.insert(0, crdtContent);
+		controller["boundRecoveryLocks"].clear();
+		await controller["syncFileFromDisk"](file, "modify");
+	}
+
+	s.check(createdFiles.size === 2, "six mutating cycles mint at most one CRDT+disk pair");
+	s.check(ytext.toString() === editorContent, "last cycle still converges CRDT to editor");
+	s.check(
+		traces.filter((event) => event.msg === "conflict-artifact-capped").length >= 1,
+		"later cycles hit the mint cap",
+	);
+	doc.destroy();
 }
 await s.done();

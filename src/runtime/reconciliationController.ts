@@ -53,6 +53,8 @@ import {
 	AMPLIFICATION_WINDOW_MS,
 	type AmplificationEntry,
 } from "./reconcile/amplificationQuarantinePolicy";
+import { evaluateConflictArtifactCap } from "./reconcile/conflictArtifactPolicy";
+
 
 export interface ReconciliationStats {
 	at: string;
@@ -291,6 +293,8 @@ export class ReconciliationController {
 	 */
 	private amplificationHistory = new Map<string, AmplificationEntry[]>();
 	private lastConflictFingerprints = new Map<string, string>();
+	private conflictArtifactsCreatedByPath = new Map<string, number>();
+	private conflictArtifactsCreatedSession = 0;
 	private blockedDivergenceCount = 0;
 	private lastBlockedDivergenceAt: string | null = null;
 	private blockedDivergenceSample: Array<{ ext: string; hash: string }> = [];
@@ -384,6 +388,8 @@ export class ReconciliationController {
 		this.recoveryFingerprints.clear();
 		this.amplificationHistory.clear();
 		this.lastConflictFingerprints.clear();
+		this.conflictArtifactsCreatedByPath.clear();
+		this.conflictArtifactsCreatedSession = 0;
 		this.blockedDivergenceCount = 0;
 		this.lastBlockedDivergenceAt = null;
 		this.blockedDivergenceSample = [];
@@ -838,6 +844,19 @@ export class ReconciliationController {
 									`closed-file-${action.reason}`,
 									action.preserveSide,
 								);
+								if (conflictPath === null) {
+									const alreadyPreserved =
+										(this.conflictArtifactsCreatedByPath.get(path) ?? 0) > 0;
+									if (!alreadyPreserved) {
+										this.deps.trace("conflict", "closed-file-conflict-capped-unpreserved", {
+											path,
+											reason: action.reason,
+											winner: action.winner,
+											preservedSide: action.preserveSide,
+										});
+										continue;
+									}
+								}
 								if (action.winner === "disk") {
 									forceReplaceYText(ytext, diskContent, ORIGIN_DISK_SYNC_RECOVER_BOUND);
 									const baselineAction = planBaselineAdvancement({
@@ -2118,6 +2137,8 @@ export class ReconciliationController {
 		let diskConflictPath: string | null = null;
 		let conflictError: string | null = null;
 		let conflictSkippedDedupe = false;
+		let conflictSkippedCap = false;
+		let conflictSkippedAmplification = false;
 		if (crdtContent != null) {
 			// Dedupe: if the same ambiguous fingerprint was already turned into
 			// a conflict artifact, do not create another one. This prevents
@@ -2137,6 +2158,14 @@ export class ReconciliationController {
 			const previousConflictFingerprint = this.lastConflictFingerprints.get(file.path);
 			if (previousConflictFingerprint === conflictFingerprint) {
 				conflictSkippedDedupe = true;
+			} else if (this.shouldQuarantineAmplification(
+				file.path,
+				"bound-file-ambiguous-divergence",
+				crdtContent.length,
+				Math.max(content.length, editorAuthority?.length ?? 0),
+			)) {
+				conflictSkippedAmplification = true;
+				this.lastConflictFingerprints.set(file.path, conflictFingerprint);
 			} else {
 				try {
 					conflictPath = await this.createMarkdownConflictArtifact(
@@ -2145,6 +2174,9 @@ export class ReconciliationController {
 						"bound-file-ambiguous-divergence",
 						"crdt",
 					);
+					if (conflictPath === null) {
+						conflictSkippedCap = true;
+					}
 					if (
 						editorAuthority !== null &&
 						content !== editorAuthority &&
@@ -2156,15 +2188,17 @@ export class ReconciliationController {
 							"bound-file-ambiguous-divergence",
 							"disk",
 						);
+						if (diskConflictPath === null) {
+							conflictSkippedCap = true;
+						}
 					}
 					this.lastConflictFingerprints.set(file.path, conflictFingerprint);
-					// Notify the user — conflict artifacts can be surprising.
-					// Throttled: only one Notice per 30s window; suppressed
-					// conflicts are counted and reported in the next notice.
-					this.showConflictNotice(
-						`Conflict detected for "${file.path.split("/").pop()}" — ` +
-						`competing version preserved as conflict note.`,
-					);
+					if (conflictPath !== null || diskConflictPath !== null) {
+						this.showConflictNotice(
+							`Conflict detected for "${file.path.split("/").pop()}" — ` +
+							`competing version preserved as a local-only conflict note.`,
+						);
+					}
 				} catch (err) {
 					conflictError = err instanceof Error ? err.message : String(err);
 				}
@@ -2176,19 +2210,26 @@ export class ReconciliationController {
 		// prevents the same ambiguity from re-triggering on the next reconcile
 		// and creating infinite conflict copies.
 		//
-		// Also attempt convergence when dedupe skipped artifact creation —
-		// the earlier artifact already preserved the losing side; retry
-		// convergence so the path can become stable.
+		// Also attempt convergence when minting was skipped (dedupe, cap, or
+		// amplification): the earlier artifact already preserved the losing
+		// side, or minting is forbidden; retry convergence so the path can
+		// become stable.
 		let convergenceApplied = false;
-		if ((conflictPath !== null || conflictSkippedDedupe) && editorAuthority !== null) {
+		const mayConverge = editorAuthority !== null && (
+			conflictPath !== null ||
+			diskConflictPath !== null ||
+			conflictSkippedDedupe ||
+			conflictSkippedCap ||
+			conflictSkippedAmplification
+		);
+		if (mayConverge && editorAuthority !== null) {
 			const existingText = vaultSync?.getTextForPath(file.path);
 			if (existingText) {
 				forceReplaceYText(existingText, editorAuthority, ORIGIN_DISK_SYNC_RECOVER_BOUND);
 				convergenceApplied = yTextToString(existingText) === editorAuthority;
-				if (convergenceApplied) {
-					// Convergence succeeded — the original path now matches disk.
-					// Clear the conflict fingerprint so a genuinely new divergence
-					// (different content) can still create a fresh artifact.
+				if (convergenceApplied && content === editorAuthority) {
+					// Fully settled: editor, disk, and CRDT agree. A later
+					// genuine split may mint again (still subject to the cap).
 					this.lastConflictFingerprints.delete(file.path);
 				}
 			}
@@ -2206,6 +2247,8 @@ export class ReconciliationController {
 			chosenSource: editorAuthority === null ? "none-multiple-editor-contents" : "editor",
 			conflictArtifactCreated: conflictPath !== null,
 			conflictSkippedDedupe,
+			conflictSkippedCap,
+			conflictSkippedAmplification,
 			convergenceApplied,
 			error: conflictError,
 		});
@@ -2444,7 +2487,25 @@ export class ReconciliationController {
 		content: string,
 		reason: string,
 		source?: "crdt" | "disk" | "editor",
-	): Promise<string> {
+	): Promise<string | null> {
+		const cap = evaluateConflictArtifactCap({
+			artifactsForPath: this.conflictArtifactsCreatedByPath.get(path) ?? 0,
+			artifactsInSession: this.conflictArtifactsCreatedSession,
+		});
+		if (!cap.allowed) {
+			this.deps.trace("conflict", "conflict-artifact-capped", {
+				path,
+				reason,
+				source: source ?? null,
+				capReason: cap.reason,
+				artifactsForPath: this.conflictArtifactsCreatedByPath.get(path) ?? 0,
+				artifactsInSession: this.conflictArtifactsCreatedSession,
+			});
+			this.showConflictNotice(
+				`Conflict loop paused for "${path.split("/").pop()}" — already preserved a local copy.`,
+			);
+			return null;
+		}
 		const basePath = this.conflictArtifactPath(path, source);
 		for (let i = 0; i < 100; i++) {
 			const candidate = i === 0
@@ -2452,6 +2513,11 @@ export class ReconciliationController {
 				: basePath.replace(/(\.md)?$/, ` ${i + 1}$1`);
 			if (this.deps.app.vault.getAbstractFileByPath(candidate)) continue;
 			await this.deps.app.vault.create(candidate, content);
+			this.conflictArtifactsCreatedByPath.set(
+				path,
+				(this.conflictArtifactsCreatedByPath.get(path) ?? 0) + 1,
+			);
+			this.conflictArtifactsCreatedSession++;
 			this.deps.trace("conflict", "conflict-artifact-created", {
 				path,
 				conflictPath: candidate,

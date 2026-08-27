@@ -54,11 +54,13 @@ The mtime policy is heuristic: the persisted timestamp is global, filesystems ma
 
 When disk, CRDT, and editor all disagree and no single authority can be selected:
 
-1. Preserve the CRDT version as a Markdown sibling conflict note.
+1. Preserve the CRDT version as a local-only Markdown sibling conflict note.
 2. Keep the editor/disk version at the original path.
-3. Converge CRDT to that original-path version only after preservation succeeds.
+3. Converge CRDT to the editor version after preservation succeeds, or when minting is skipped because this path already hit the artifact cap / fingerprint / amplification brake.
 
-If artifact creation fails, convergence must not discard either version. Repeated identical conflict fingerprints are deduplicated within the session.
+If artifact creation fails, convergence must not discard either version. Repeated identical conflict fingerprints are deduplicated within the session. Fingerprints are not cleared while disk still disagrees with the editor. At most two markdown conflict artifacts are minted per source path per session (CRDT sibling + disk sibling), and at most twenty per session vault-wide. Further cycles converge without creating files.
+
+Markdown conflict artifact paths are not CRDT-syncable. They stay on the creating device.
 
 A known gap remains when both disk and CRDT changed from baseline but the editor matches one side: the current bound-file branches can choose a winner without running the complete three-way classifier. This is BACKLOG `SYNC-02`.
 
@@ -71,7 +73,7 @@ If an attachment target changes locally while a remote download is in flight:
 3. Suppress that artifact from immediate upload.
 4. Notify the user.
 
-Attachment conflict artifacts are local-only. Markdown conflict artifacts synchronize normally.
+Attachment and markdown conflict artifacts are both local-only.
 
 ## Remote delete
 
@@ -109,7 +111,7 @@ A later safe reconcile or explicit user action may resolve the block.
 
 ## Recovery-loop controls
 
-Repeated identical recovery attempts are quarantined after three matching fingerprints within ten minutes. Fingerprints are bounded and session-local. A separate monotonic-growth detector catches the typing-cadence amplification shape. These are safety nets, not proof that every possible recovery loop is impossible.
+Repeated identical recovery attempts are quarantined after three matching fingerprints within ten minutes. Fingerprints are bounded and session-local. A separate monotonic-growth detector catches the typing-cadence amplification shape. Markdown conflict-artifact minting is separately capped per path and per session; those siblings are local-only. These are safety nets, not proof that every possible recovery loop is impossible.
 
 ## Receipt and status language
 
